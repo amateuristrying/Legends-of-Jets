@@ -7,7 +7,7 @@ export { CrewRoom } from './room.js';
 const api = '/api/crew/';
 const mutations = new Set([
   'session', 'session/keepalive', 'session/end', 'invite', 'respond', 'create',
-  'room-response', 'socket-ticket', 'close',
+  'room-response', 'socket-ticket', 'room-session', 'close',
 ]);
 
 export default {
@@ -35,6 +35,10 @@ export default {
       let body = {};
       if (request.method === 'POST') {
         try { body = await readBody(request); } catch { return bad('Invalid request.'); }
+      }
+      if (path === 'room-session') {
+        if (typeof body.room !== 'string' || !ROOM_ID.test(body.room)) return bad('Invalid room.', 404);
+        return await roomWorker(body.room).fetch(internal('/session', { token, body }));
       }
       const ip = request.headers.get('CF-Connecting-IP') ?? 'unknown';
       const directory = env.CREW_DIRECTORY.get(env.CREW_DIRECTORY.idFromName('guest:' + url.hostname));

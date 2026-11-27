@@ -37,6 +37,7 @@ export interface CrewSnapshot {
   rules: CrewRules;
   winner: number | null;
   score: [number, number];
+  matchId: number;
   sequence: number;
   time: number;
   remaining: number;
@@ -48,6 +49,7 @@ export interface CrewSnapshot {
     bot: boolean;
     points: number;
     deaths: number;
+    inputAck: number;
     flight: FlightState;
     arms: WeaponsState;
     outside: number | null;
@@ -56,8 +58,8 @@ export interface CrewSnapshot {
     event: number;
     message: string;
   }>;
-  shots: Array<{ kind: 'tracer' | 'missile' | 'rocket'; pos: Vec3; size: number; fromTeam: number }>;
-  effects: Array<{ kind: 'spark' | 'flare'; pos: Vec3; size: number }>;
+  shots: Array<{ id: number; kind: 'tracer' | 'missile' | 'rocket'; pos: Vec3; velocity: Vec3; size: number; fromTeam: number }>;
+  effects: Array<{ id: number; kind: 'spark' | 'flare'; pos: Vec3; velocity: Vec3; size: number }>;
 }
 
 async function request<T = Record<string, unknown>>(
@@ -66,9 +68,13 @@ async function request<T = Record<string, unknown>>(
   token?: string,
   keepalive = false,
 ): Promise<T> {
+  if (location.protocol === 'file:') {
+    throw Object.assign(new Error('Crew requires the online Cloudflare Worker server.'), { status: 503 });
+  }
   const headers = new Headers();
   if (token) headers.set('Authorization', 'Bearer ' + token);
   const options: RequestInit = { credentials: 'omit', cache: 'no-store', headers, keepalive };
+  if (!keepalive) options.signal = AbortSignal.timeout(9000);
   if (data !== undefined) {
     options.method = 'POST';
     headers.set('Content-Type', 'application/json');
@@ -94,10 +100,12 @@ export class CrewClient {
   lobby: CrewLobby | null = null;
   pingMs: number | null = null;
   private inputFlags: Partial<ControlInput> = {};
-  private nextInput = 0;
-  private lastSendAt = 0;
+  private inputSequence = 0;
   private retries = 0;
-  private closedSockets = new WeakSet<WebSocket>();
+  private roomGeneration = 0;
+  private resumeToken: string | null = null;
+  private reconnectTimer: number | undefined;
+  private socketWatch: number | undefined;
   private token: string | null = null;
   private opening: Promise<string> | null = null;
   private pageGeneration = 0;
@@ -140,13 +148,7 @@ export class CrewClient {
       return await request<T>(path, data, token);
     } catch (error) {
       if ((error as { status?: number }).status !== 401) throw error;
-      if (this.token === token) {
-        this.token = null;
-        if (this.room) {
-          this.disconnect();
-          this.onClosed?.('Crew session expired. Share your new pilot code to reconnect.');
-        }
-      }
+      if (this.token === token) this.token = null;
       if (retry) return request<T>(path, data, await this.session());
       throw error;
     }
@@ -154,15 +156,16 @@ export class CrewClient {
 
   startPresence(): () => void {
     if (location.protocol === 'file:') return () => {};
-    let mounted = true, pageOpen = true, refreshing = false, leftRoom = false;
+    let mounted = true, pageOpen = true, refreshing = false;
     const warmup = async () => {
       if (await this.checkStatus() && mounted && pageOpen) await this.session();
     };
     const maintain = async () => {
-      if (!mounted || !pageOpen || !this.token || refreshing) return;
+      if (!mounted || !pageOpen || refreshing) return;
       refreshing = true;
       try {
-        await this.pilotRequest('session/keepalive', {});
+        if (this.token) await this.pilotRequest('session/keepalive', {});
+        else await warmup();
       } catch (error) {
         if ((error as { status?: number }).status === 401 && mounted && pageOpen) {
           await this.session().catch(() => {});
@@ -171,31 +174,41 @@ export class CrewClient {
         refreshing = false;
       }
     };
-    const pageHide = () => {
+    const pageHide = (event: PageTransitionEvent) => {
       pageOpen = false;
-      leftRoom = this.room !== null;
+      if (event.persisted) return;
       this.pageGeneration++;
       const token = this.token;
+      const { room, resumeToken } = this;
       this.token = null;
       this.opening = null;
       this.disconnect();
       if (token) void request('session/end', {}, token, true).catch(() => {});
+      if (room && resumeToken) {
+        void request('room-session', { room, action: 'leave' }, resumeToken, true).catch(() => {});
+      }
     };
     const pageShow = (event: PageTransitionEvent) => {
       if (!event.persisted) return;
       pageOpen = true;
-      if (leftRoom) this.onClosed?.('The previous Crew session ended. Share your new pilot code.');
-      void warmup().catch(() => {});
+      void maintain();
     };
-    void warmup().catch(() => {});
-    const timer = window.setInterval(() => { void maintain(); }, 25_000);
+    const wake = () => { if (!document.hidden) void maintain(); };
+    void maintain();
+    const timer = window.setInterval(() => { void maintain(); }, 40_000);
     window.addEventListener('pagehide', pageHide);
     window.addEventListener('pageshow', pageShow);
+    window.addEventListener('online', wake);
+    window.addEventListener('focus', wake);
+    document.addEventListener('visibilitychange', wake);
     return () => {
       mounted = false;
       window.clearInterval(timer);
       window.removeEventListener('pagehide', pageHide);
       window.removeEventListener('pageshow', pageShow);
+      window.removeEventListener('online', wake);
+      window.removeEventListener('focus', wake);
+      document.removeEventListener('visibilitychange', wake);
     };
   }
 
@@ -220,123 +233,167 @@ export class CrewClient {
   }
 
   async closeRoom(): Promise<void> {
-    if (!this.room) return;
-    await this.pilotRequest('close', { room: this.room });
-    this.disconnect();
+    const { room, resumeToken } = this;
+    if (!room) return;
+    try {
+      await this.pilotRequest('close', { room });
+    } catch (error) {
+      const status = (error as { status?: number }).status;
+      if (!resumeToken || (status !== 401 && status !== 403)) throw error;
+      await request('room-session', { room, action: 'close' }, resumeToken);
+    }
+    if (this.room === room) this.disconnect();
   }
 
-  async connect(room: string, plane: number, retry = false): Promise<void> {
-    if (!retry) {
-      this.disconnect();
-      this.retries = 0;
-    }
+  async connect(room: string, plane: number): Promise<void> {
+    if (this.room !== room) this.disconnect();
     this.room = room;
-    this.onStatus?.('Connecting to lobby…', false);
-    let ticket: string;
+    this.retries = 0;
+    const generation = ++this.roomGeneration;
+    this.stopSocket();
+    this.onStatus?.('Connecting to lobby…');
     try {
-      ({ ticket } = await this.pilotRequest<{ ticket: string }>('socket-ticket', { room, plane }));
+      await this.openSocket(room, plane, generation);
     } catch (error) {
-      if (this.room === room) this.room = null;
+      if (this.roomGeneration === generation) this.disconnect();
       throw error;
     }
-    if (this.room !== room) return;
+  }
+
+  private async openSocket(room: string, plane: number, generation: number): Promise<void> {
+    const { ticket } = this.resumeToken
+      ? await request<{ ticket: string }>('room-session', { room, plane, action: 'resume' }, this.resumeToken)
+      : await this.pilotRequest<{ ticket: string }>('socket-ticket', { room, plane });
+    if (this.roomGeneration !== generation) return;
 
     const url = new URL(api + 'socket/' + room, location.origin);
     url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
     const ws = new WebSocket(url, [protocol, ticket]);
     this.socket = ws;
+    let lastMessage = performance.now();
+    let newestPing: number | undefined;
 
     ws.addEventListener('message', (event) => {
       if (this.socket !== ws) return;
-      if (this.lastSendAt > 0) {
-        const rtt = Math.round(performance.now() - this.lastSendAt);
-        if (rtt > 0 && rtt < 2000) this.pingMs = rtt;
-      }
       let message: { t: string; [key: string]: unknown };
       try {
         message = JSON.parse(event.data);
       } catch {
         return;
       }
-      if (message.t === 'you') this.id = String(message.id);
-      else if (message.t === 'lobby') {
+      lastMessage = performance.now();
+      if (message.t === 'you') {
+        this.id = String(message.id);
+        if (typeof message.resume === 'string') this.resumeToken = message.resume;
+      } else if (message.t === 'lobby') {
         this.lobby = message as unknown as CrewLobby;
         this.retries = 0;
-        this.onStatus?.('', false);
+        this.onStatus?.('');
+        this.onConnection?.(true);
         this.onLobby?.(this.lobby);
       } else if (message.t === 'frame' && this.id) {
         this.onFrame?.(message as unknown as CrewSnapshot, this.id);
+      } else if (message.t === 'pong' && newestPing !== undefined && message.at === newestPing) {
+        const rtt = lastMessage - newestPing;
+        this.pingMs = Math.round(this.pingMs === null ? rtt : this.pingMs * 0.8 + rtt * 0.2);
       } else if (message.t === 'error') {
         this.onStatus?.(String(message.message), true);
       }
     });
 
     ws.addEventListener('close', (event) => {
-      if (this.socket !== ws || this.closedSockets.has(ws)) return;
-      this.socket = null;
-      if (
-        event.reason === 'Host closed this lobby' ||
-        event.reason === 'Replaced by a new connection'
-      ) {
-        this.disconnect();
-        this.onClosed?.(event.reason);
+      if (this.socket !== ws) return;
+      this.stopSocket();
+      if (['Host closed this lobby', 'Replaced by a new connection', 'Left this lobby'].includes(event.reason)) {
+        this.endRoom(event.reason);
         return;
       }
-      this.onStatus?.('Connection interrupted. Reconnecting…', true);
-      this.onConnection?.(false);
-      if (this.retries++ < 3) {
-        setTimeout(() => {
-          if (this.room !== room || this.socket) return;
-          this.connect(room, plane, true).catch((err) => {
-            this.onStatus?.(err.message, true);
-            this.onConnection?.(false);
-          });
-        }, 1000 * this.retries);
-      } else {
-        this.onStatus?.('Could not reconnect. Open the lobby again from Crew.', true);
-      }
+      this.scheduleReconnect(room, plane, generation);
     });
 
-    ws.addEventListener('open', () => this.onConnection?.(true));
+    this.socketWatch = window.setInterval(() => {
+      if (this.socket !== ws) return;
+      const now = performance.now();
+      if (!document.hidden && now - lastMessage > 15_000) {
+        this.stopSocket();
+        this.scheduleReconnect(room, plane, generation);
+      } else if (this.send({ t: 'ping', at: now })) {
+        newestPing = now;
+      }
+    }, 3000);
+  }
+
+  private scheduleReconnect(room: string, plane: number, generation: number): void {
+    this.onConnection?.(false);
+    if (this.retries >= 12) {
+      this.endRoom('Could not reconnect to Crew. Rejoin from the hangar.');
+      return;
+    }
+    this.onStatus?.('Connection interrupted. Reconnecting…', true);
+    const delay = Math.min(500 * 2 ** this.retries++, 5000);
+    this.reconnectTimer = window.setTimeout(() => {
+      if (this.roomGeneration !== generation) return;
+      void this.openSocket(room, plane, generation).catch((error) => {
+        if (this.roomGeneration !== generation) return;
+        const status = (error as { status?: number }).status;
+        if (status === 401 || status === 403 || status === 410) {
+          this.endRoom('This Crew lobby has ended. Create or join a new lobby.');
+        } else {
+          this.scheduleReconnect(room, plane, generation);
+        }
+      });
+    }, delay);
+  }
+
+  private endRoom(reason: string): void {
+    this.disconnect();
+    this.onStatus?.(reason, true);
+    this.onClosed?.(reason);
   }
 
   async switchPlaneInLobby(plane: number): Promise<void> {
-    if (!this.room) return;
-    await this.connect(this.room, plane, false);
+    if (this.room) await this.connect(this.room, plane);
   }
 
-  send(value: unknown): void {
-    if (this.socket?.readyState === WebSocket.OPEN && this.socket.bufferedAmount < 32000) {
-      this.lastSendAt = performance.now();
-      this.socket.send(JSON.stringify(value));
-    }
+  private send(value: unknown): boolean {
+    if (this.socket?.readyState !== WebSocket.OPEN || this.socket.bufferedAmount >= 4096) return false;
+    this.socket.send(JSON.stringify(value));
+    return true;
   }
 
   startMatch(): void {
     this.send({ t: 'start' });
   }
 
-  sendControls(command: ControlInput, now: number): void {
+  sendControls(command: ControlInput, matchId: number): number | null {
     for (const flag of ['missile', 'rocket', 'flare', 'roll'] as const) {
-      this.inputFlags[flag] = Boolean(this.inputFlags[flag] || command[flag]);
+      if (command[flag]) this.inputFlags[flag] = true;
     }
-    if (now < this.nextInput) return;
-    this.send({ t: 'input', command: { ...command, ...this.inputFlags } });
+    const sequence = this.inputSequence + 1;
+    if (!this.send({ t: 'input', matchId, sequence, command: { ...command, ...this.inputFlags } })) return null;
     this.inputFlags = {};
-    this.nextInput = now + 40;
+    this.inputSequence = sequence;
+    return sequence;
+  }
+
+  private stopSocket(): void {
+    const socket = this.socket;
+    this.socket = null;
+    socket?.close();
+    window.clearTimeout(this.reconnectTimer);
+    window.clearInterval(this.socketWatch);
+    this.inputFlags = {};
+    this.pingMs = null;
   }
 
   disconnect(): void {
-    if (this.socket) {
-      this.closedSockets.add(this.socket);
-      this.socket.close();
-    }
-    this.socket = null;
+    this.roomGeneration++;
+    this.stopSocket();
     this.room = null;
     this.lobby = null;
     this.id = null;
-    this.pingMs = null;
-    this.inputFlags = {};
+    this.resumeToken = null;
+    this.inputSequence = 0;
     this.onLobby?.(null);
   }
 }

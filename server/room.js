@@ -10,6 +10,7 @@ export class CrewRoom extends DurableObject {
     super(ctx,env);
     this.clients = new Map();
     this.tickets = new Map();
+    this.resumes = new Map();
     this.plan = null;
     this.match = null;
     this.closed = false;
@@ -35,26 +36,62 @@ export class CrewRoom extends DurableObject {
     });
   }
 
+  terminate() {
+    this.closed = true;
+    this.stop();
+    for (const client of this.clients.values()) client.ws.close(1000, 'Host closed this lobby');
+    this.clients.clear();
+    this.tickets.clear();
+    this.resumes.clear();
+  }
+
+  issueTicket(id, plane) {
+    const now = Date.now();
+    for (const [key, ticket] of this.tickets) {
+      if (ticket.expiry < now || ticket.id === id) this.tickets.delete(key);
+    }
+    const ticket = crypto.randomUUID();
+    this.tickets.set(ticket, { id, plane, expiry: now + 45_000 });
+    return reply({ ticket });
+  }
+
   async fetch(request) {
     const path = new URL(request.url).pathname;
     if (path === '/terminate' && request.method==='POST') {
-      this.closed = true;
-      this.stop();
-      for (const client of this.clients.values()) client.ws.close(1000,'Host closed this lobby');
-      this.clients.clear();
-      this.tickets.clear();
+      this.terminate();
       return reply({ ok:true });
     }
     if (this.closed) return bad('This lobby is closed.',410);
+    if (path === '/session' && request.method === 'POST') {
+      const { token, body } = await readBody(request);
+      const entry = [...this.resumes].find(([, resume]) => resume === token);
+      if (!entry) return bad('This lobby session is no longer available.', 410);
+      const [id] = entry;
+      if (body.action === 'close' && id !== this.plan.host) return bad('Only the host can close the lobby.', 403);
+      if (body.action === 'leave' || body.action === 'close') {
+        if (id === this.plan.host) this.terminate();
+        else {
+          this.resumes.delete(id);
+          for (const [key, ticket] of this.tickets) {
+            if (ticket.id === id) this.tickets.delete(key);
+          }
+          const client = this.clients.get(id);
+          if (client) {
+            this.remove(client);
+            client.ws.close(1000, 'Left this lobby');
+          }
+        }
+        return reply({ ok: true });
+      }
+      if (body.action !== 'resume') return bad('Invalid room action.');
+      const plane = [0, 1, 2, 3, 4].includes(body.plane) ? body.plane : 0;
+      return this.issueTicket(id, plane);
+    }
     if (path === '/ticket' && request.method==='POST') {
       const { me,room,plane } = await readBody(request);
       this.plan ??= room;
       if (!this.plan.members.some(member=>member.id===me.id)) return bad('Invalid seat.',403);
-      const now = Date.now();
-      for (const [key,ticket] of this.tickets) if (ticket.expiry < now || ticket.id===me.id) this.tickets.delete(key);
-      const token = crypto.randomUUID();
-      this.tickets.set(token,{ id:me.id, plane,expiry:now+45000 });
-      return reply({ ticket:token });
+      return this.issueTicket(me.id, plane);
     }
     if (request.headers.get('Upgrade')?.toLowerCase()!=='websocket') return bad('WebSocket required.',426);
     const [protocol, token] = (request.headers.get('Sec-WebSocket-Protocol') ?? '').split(',').map(value=>value.trim());
@@ -70,7 +107,12 @@ export class CrewRoom extends DurableObject {
     serverSocket.addEventListener('message',event=>this.message(client,event.data));
     serverSocket.addEventListener('close',()=>this.remove(client));
     serverSocket.addEventListener('error',()=>this.remove(client));
-    this.send(client,JSON.stringify({ t:'you',id:client.id }));
+    let resume = this.resumes.get(client.id);
+    if (!resume) {
+      resume = crypto.randomUUID();
+      this.resumes.set(client.id, resume);
+    }
+    this.send(client,JSON.stringify({ t:'you',id:client.id,resume }));
     this.lobby();
     if (this.match) this.send(client,JSON.stringify(snapshot(this.match,Date.now())));
     return new Response(null,{
@@ -81,7 +123,7 @@ export class CrewRoom extends DurableObject {
   remove(client) {
     if (this.clients.get(client.id)!==client) return;
     this.clients.delete(client.id);
-    if (this.match) setMatchInput(this.match,client.id,{},Date.now());
+    if (this.match) setMatchInput(this.match,client.id,null,Date.now());
     if (this.plan) this.lobby();
   }
 
@@ -93,8 +135,11 @@ export class CrewRoom extends DurableObject {
     let message;
     try { message = JSON.parse(value); } catch { return; }
     if (!message || typeof message!=='object') return;
-    if (message.t==='input' && this.match) {
-      setMatchInput(this.match,client.id,message.command,now);
+    if (message.t === 'ping' && typeof message.at === 'number' && Number.isFinite(message.at)) {
+      this.send(client, JSON.stringify({ t: 'pong', at: message.at }));
+    } else if (message.t==='input' && this.match &&
+        (message.matchId === undefined || message.matchId === this.match.start)) {
+      setMatchInput(this.match,client.id,message.command,now,message.sequence);
     } else if (message.t==='start' && client.id===this.plan.host && this.match?.phase!=='playing') {
       if (this.plan.members.some(member=>!this.clients.has(member.id))) {
         this.send(client,JSON.stringify({t:'error',message:'Wait for every invited pilot to join.'}));
@@ -104,6 +149,7 @@ export class CrewRoom extends DurableObject {
       this.match = createMatch(this.plan.rules,members,now);
       this.lastTick = now;
       this.elapsed = 0;
+      this.frames = 0;
       this.lobby();
       this.broadcast(snapshot(this.match,now));
       this.timer = setInterval(()=>this.tick(),25);
@@ -121,8 +167,8 @@ export class CrewRoom extends DurableObject {
       steps++;
     }
     this.frames = (this.frames ?? 0) + steps;
-    if (this.frames >= 3 || this.match.phase==='finished') {
-      this.frames = 0;
+    if (this.frames >= 2 || this.match.phase==='finished') {
+      this.frames %= 2;
       this.broadcast(snapshot(this.match,now));
     }
     if (this.match.phase==='finished') {

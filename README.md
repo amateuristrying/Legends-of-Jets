@@ -116,7 +116,7 @@ All bindings are customizable in **Settings**, with full support for **Mouse-Aim
 2. Copy your code to a friend, or enter their code and send an invite. The recipient accepts, then the host creates a lobby and invites the accepted pilots.
 3. Keep the same game tabs open while you play. Reloading a tab creates a new code. Any invites and lobby access tied to the old code expire. A Worker restart can also clear active sessions.
 
-Codes, invite lists, and online matches live in memory. Guest sessions use browser memory and expire after a short period of inactivity. Single-player saves and settings use browser storage independently of Crew.
+Codes, invite lists, and online matches live in memory. An open tab keeps its code with heartbeats. Idle codes expire after ten minutes, and reloading still generates a new code. A briefly disconnected player can rejoin a running match from the same tab using its lobby session. A Worker restart can clear in-memory Crew state. Single-player saves and settings use browser storage independently of Crew.
 
 ### Deploy Crew at the existing Pages address
 

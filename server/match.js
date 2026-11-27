@@ -91,6 +91,8 @@ function makePilot(record, slot, team, map, bot = false) {
     reaction: 0,
     input: { ...IDLE },
     lastInput: -1e9,
+    inputSequence: 0,
+    inputAck: 0,
     armory: { arms: weapons(record.plane), phase: 'arena', effects: [], shots: [], event: 0, message: '' },
   };
   spawn(pilot, map);
@@ -109,6 +111,7 @@ export function createMatch(rules, members, now) {
     effects: [],
     winner: null,
     sequence: 0,
+    nextEntityId: 0,
   };
   if (rules.mode === 'bots') {
     for (let slot = 0; slot < rules.seats; slot++) {
@@ -120,9 +123,18 @@ export function createMatch(rules, members, now) {
   return match;
 }
 
-export function setMatchInput(match, id, command, now) {
+export function setMatchInput(match, id, command, now, sequence) {
   const pilot = match.pilots.find(item => item.id === id && !item.bot);
   if (!pilot || match.phase !== 'playing') return;
+  if (sequence !== undefined) {
+    if (!Number.isSafeInteger(sequence) || sequence <= pilot.inputSequence) return;
+    pilot.inputSequence = sequence;
+  }
+  if (command === null) {
+    pilot.input = { ...IDLE };
+    pilot.lastInput = -1e9;
+    return;
+  }
   const input = normalizeInput(command);
   for (const flag of ['missile', 'rocket', 'flare', 'roll']) input[flag] ||= pilot.input[flag];
   pilot.input = input;
@@ -193,6 +205,7 @@ function defeat(match, pilot, killer, cause) {
   for (let i = 0; i < 9; i++) {
     const angle = i * 2.4;
     match.effects.push({
+      id: ++match.nextEntityId,
       kind: 'spark',
       pos: pilot.flight.pos,
       velocity: [Math.cos(angle) * 50, (i - 4) * 12, Math.sin(angle) * 50],
@@ -264,6 +277,7 @@ export function tickMatch(match, now, dt = STEP) {
     pilot.spawnShield = Math.max(0, pilot.spawnShield - dt);
     pilot.refuelCooldown = Math.max(0, (pilot.refuelCooldown ?? 0) - dt);
     const command = pilot.bot ? decideBot(match, pilot, dt) : now - pilot.lastInput < 450 ? pilot.input : IDLE;
+    pilot.inputAck = pilot.inputSequence;
     const alive = pilot.flight.death <= 0;
     stepFlight(pilot.flight, command, map, dt);
     if (pilot.flight.recovered) { spawn(pilot, map); continue; }
@@ -298,8 +312,8 @@ export function tickMatch(match, now, dt = STEP) {
       map,
       dt
     );
-    for (const shot of pilot.armory.shots) match.shots.push({ ...shot, owner: pilot });
-    for (const effect of pilot.armory.effects) match.effects.push(effect);
+    for (const shot of pilot.armory.shots) match.shots.push({ ...shot, owner: pilot, id: ++match.nextEntityId });
+    for (const effect of pilot.armory.effects) match.effects.push({ ...effect, id: ++match.nextEntityId });
     pilot.armory.shots.length = pilot.armory.effects.length = 0;
     if (!pilot.bot) pilot.input.missile = pilot.input.rocket = pilot.input.flare = pilot.input.roll = false;
   }
@@ -316,6 +330,7 @@ export function snapshot(match, now) {
     rules: match.rules,
     winner: match.winner,
     score: standings(match),
+    matchId: match.start,
     sequence: ++match.sequence,
     time: match.time,
     remaining: Math.max(0, (match.end - now) / 1000),
@@ -327,6 +342,7 @@ export function snapshot(match, now) {
       bot: pilot.bot,
       points: pilot.points,
       deaths: pilot.deaths,
+      inputAck: pilot.inputAck,
       flight: pilot.flight,
       arms: pilot.armory.arms,
       outside: pilot.outside > 0 ? Math.max(0, OUTSIDE_SECONDS - pilot.outside) : null,
@@ -335,7 +351,7 @@ export function snapshot(match, now) {
       event: pilot.armory.event,
       message: pilot.armory.message,
     })),
-    shots: match.shots.map(shot => ({ kind: shot.kind, pos: shot.pos, size: shot.size, fromTeam: shot.owner.team })),
-    effects: match.effects.map(effect => ({ kind: effect.kind, pos: effect.pos, size: effect.size })),
+    shots: match.shots.map(shot => ({ id: shot.id, kind: shot.kind, pos: shot.pos, velocity: shot.velocity, size: shot.size, fromTeam: shot.owner.team })),
+    effects: match.effects.map(effect => ({ id: effect.id, kind: effect.kind, pos: effect.pos, velocity: effect.velocity, size: effect.size })),
   };
 }

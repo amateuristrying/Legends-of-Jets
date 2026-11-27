@@ -48,6 +48,7 @@ import {
   saveSettings,
 } from './engine/storage';
 import { CrewClient, type CrewSnapshot } from './engine/crew';
+import { CREW_STEP, CrewPrediction, CrewTimeline, sampleCrewEntities, sampleCrewPilot } from './engine/crew-sync';
 import { CampaignModal } from './components/CampaignModal';
 import { CrewModal } from './components/CrewModal';
 import { SettingsModal } from './components/SettingsModal';
@@ -259,7 +260,8 @@ export const App: React.FC = () => {
 
   // Crew sync refs
   const crewLatestRef = useRef<CrewSnapshot | null>(null);
-  const crewPrevRef = useRef<CrewSnapshot | null>(null);
+  const crewTimelineRef = useRef(new CrewTimeline());
+  const crewPredictionRef = useRef(new CrewPrediction());
   const crewSyncedRef = useRef<CrewSnapshot | null>(null);
   const crewReceivedRef = useRef(0);
   const crewIdRef = useRef<string | null>(null);
@@ -401,6 +403,7 @@ export const App: React.FC = () => {
       }
       missionRef.current = m;
       crewSyncedRef.current = null;
+      crewPredictionRef.current.reset();
       simTimeRef.current = 0;
       trailRef.current = [];
       lastTrailRef.current = -1;
@@ -483,20 +486,25 @@ export const App: React.FC = () => {
     const crew = crewRef.current!;
     crew.onFrame = (snapshot, id) => {
       if (!id || !snapshot.pilots.some((p) => p.id === id)) return;
+      const previous = crewLatestRef.current;
       const isNew =
-        !crewLatestRef.current ||
-        crewLatestRef.current.phase !== 'playing' ||
-        snapshot.sequence < crewLatestRef.current.sequence ||
+        !previous ||
+        previous.matchId !== snapshot.matchId ||
+        (previous.phase === 'finished' && snapshot.phase === 'playing') ||
         sceneStateRef.current !== 'flight' ||
         missionRef.current?.mode !== 'crew';
+      if (!isNew && previous && snapshot.sequence <= previous.sequence) return;
+      if (isNew && snapshot.phase === 'playing') crewTimelineRef.current.reset();
       crewIdRef.current = id;
-      crewPrevRef.current = isNew ? null : crewLatestRef.current;
       crewLatestRef.current = snapshot;
-      crewReceivedRef.current = performance.now();
+      const received = performance.now();
+      crewReceivedRef.current = received;
+      crewTimelineRef.current.push(snapshot, received / 1000);
       if (snapshot.phase === 'playing' && isNew) launchMode('crew');
     };
     crew.onConnection = (ok) => {
       crewConnectedRef.current = ok;
+      if (!ok) crewPredictionRef.current.clearPending();
     };
     crew.onClosed = (reason) => {
       if (sceneStateRef.current === 'flight' && missionRef.current?.mode === 'crew') {
@@ -637,6 +645,7 @@ export const App: React.FC = () => {
     let rafId = 0;
     let lastTime: number | undefined;
     let accumulator = 0;
+    let crewAccumulator = 0;
     let hudTimer = -1;
     let radarTimer = 0;
     let logAccumulator = 0;
@@ -761,65 +770,32 @@ export const App: React.FC = () => {
           }
 
           if (m.mode === 'crew' && crewLatestRef.current && crewIdRef.current) {
-            const cmd = sampleInput();
-            crewRef.current?.sendControls(cmd, timestamp);
             const snap = crewLatestRef.current;
             const own = snap.pilots.find((p) => p.id === crewIdRef.current);
-            if (own) {
-              if (crewSyncedRef.current !== snap) {
-                const srv = own.flight;
-                const d = Math.hypot(
-                  srv.pos[0] - f.pos[0],
-                  srv.pos[1] - f.pos[1],
-                  srv.pos[2] - f.pos[2]
-                );
-                const respawned = Boolean(srv.recovered) || (f.death > 0 && srv.death <= 0) || d > 42;
-                if (respawned || (f.death > 0) !== (srv.death > 0)) {
-                  Object.assign(f, srv);
-                  prevFlightRef.current = { ...f, pos: [...f.pos] as Vec3 };
-                  if (respawned) {
-                    trailRef.current = [];
-                    lastTrailRef.current = -1;
-                  }
-                } else {
-                  const proj =
-                    srv.death > 0
-                      ? srv.pos
-                      : add(srv.pos, scale(forward(srv.yaw, srv.pitch), srv.speed * 0.02));
-                  f.pos = [
-                    mix(f.pos[0], proj[0], 0.34),
-                    mix(f.pos[1], proj[1], 0.34),
-                    mix(f.pos[2], proj[2], 0.34),
-                  ];
-                  const arc = Math.atan2(Math.sin(srv.yaw - f.yaw), Math.cos(srv.yaw - f.yaw));
-                  f.yaw += arc * 0.28;
-                  f.hull = srv.hull;
-                  f.maxHull = srv.maxHull ?? (planes[f.type]?.hull ?? 100);
-                  f.fuel = srv.fuel ?? f.fuel;
-                  f.maxFuel = srv.maxFuel ?? f.maxFuel;
-                  f.fuelBurnRate = srv.fuelBurnRate ?? f.fuelBurnRate;
-                  f.lowFuel = Boolean(srv.lowFuel);
-                  f.flameout = Boolean(srv.flameout);
-                  f.death = srv.death;
+            const timeline = crewTimelineRef.current.sample(time);
+            if (own && timeline) {
+              const prediction = crewPredictionRef.current;
+              const synced = crewSyncedRef.current;
+              if (synced !== snap) {
+                const prior = synced?.pilots.find((p) => p.id === own.id);
+                const respawned = own.flight.recovered || (f.death > 0 && own.flight.death <= 0) ||
+                  (prior !== undefined && own.deaths !== prior.deaths && own.flight.death <= 0);
+                const discontinuity = !synced || respawned || (f.death > 0) !== (own.flight.death > 0);
+                Object.assign(f, prediction.reconcile(f, own.flight, own.inputAck ?? Infinity, curMap, discontinuity));
+                prevFlightRef.current = { ...f };
+                if (discontinuity) crewAccumulator = 0;
+                if (respawned) {
+                  trailRef.current = [];
+                  lastTrailRef.current = -1;
+                  lastCameraRef.current = null;
+                  transitionRef.current = null;
                 }
                 crewSyncedRef.current = snap;
               }
-              const frac = clamp((timestamp - crewReceivedRef.current) / 75, 0, 1);
-              const contacts = snap.pilots
-                .filter((p) => p.id !== crewIdRef.current && p.flight.death <= 0)
+              const contacts = timeline.from.pilots
+                .filter((p) => p.id !== own.id && p.flight.death <= 0)
                 .map((p) => {
-                  const prior = crewPrevRef.current?.pilots.find((x) => x.id === p.id);
-                  const jumpDist = prior
-                    ? Math.hypot(
-                        prior.flight.pos[0] - p.flight.pos[0],
-                        prior.flight.pos[1] - p.flight.pos[1],
-                        prior.flight.pos[2] - p.flight.pos[2]
-                      )
-                    : 999;
-                  const fp =
-                    prior && !p.flight.recovered && prior.flight.death <= 0 && jumpDist < 120
-                      ? interpolateFlight(prior.flight, p.flight, frac)
-                      : p.flight;
+                  const fp = sampleCrewPilot(p, timeline);
                   const friendly = p.team === own.team;
                   return {
                     id: p.id,
@@ -858,7 +834,7 @@ export const App: React.FC = () => {
               m.outside = own.outside;
               m.score = [snap.score[own.team], snap.score[1 - own.team]];
               m.remaining = Math.max(0, snap.remaining - Math.min(0.5, (timestamp - crewReceivedRef.current) / 1000));
-              m.shots = snap.shots.map((s) => ({
+              m.shots = sampleCrewEntities(timeline.from.shots, timeline.to.shots, timeline).map((s) => ({
                 kind: s.kind === 'missile' && s.fromTeam !== own.team ? 'enemyMissile' : s.kind,
                 pos: s.pos,
                 velocity: [0, 0, 0],
@@ -866,7 +842,7 @@ export const App: React.FC = () => {
                 size: s.size,
                 damage: 0,
               }));
-              m.effects = snap.effects.map((e) => ({
+              m.effects = sampleCrewEntities(timeline.from.effects, timeline.to.effects, timeline).map((e) => ({
                 kind: e.kind,
                 pos: e.pos,
                 velocity: [0, 0, 0],
@@ -874,21 +850,17 @@ export const App: React.FC = () => {
                 size: e.size,
               }));
               if (snap.phase === 'playing') {
-                accumulator += dt;
-                while (accumulator >= SIM_STEP) {
-                  prevFlightRef.current = { ...f, pos: [...f.pos] as Vec3 };
-                  if (!own.flight.death) {
-                    stepFlight(f, cmd, curMap, SIM_STEP, 'arcade');
-                    if (f.death) {
-                      f.pos = [...prevFlightRef.current.pos] as Vec3;
-                      f.death = 0;
-                      f.hull = own.flight.hull;
-                    }
+                if (crewConnectedRef.current && timestamp - crewReceivedRef.current < 450) {
+                  crewAccumulator += dt;
+                  while (crewAccumulator >= CREW_STEP) {
+                    const cmd = sampleInput();
+                    const sequence = crewRef.current!.sendControls(cmd, snap.matchId);
+                    prevFlightRef.current = { ...f };
+                    Object.assign(f, prediction.step(f, cmd, curMap, sequence));
+                    simTimeRef.current += CREW_STEP;
+                    rememberPlayerTrail(f, simTimeRef.current);
+                    crewAccumulator -= CREW_STEP;
                   }
-                  simTimeRef.current += SIM_STEP;
-                  rememberPlayerTrail(f, simTimeRef.current);
-                  accumulator -= SIM_STEP;
-                  cmd.roll = false;
                 }
               } else if (snap.phase === 'finished' && !modalRef.current) {
                 setModal('crew-results');
@@ -984,7 +956,9 @@ export const App: React.FC = () => {
           }
         }
 
-        pose = interpolateFlight(prevFlightRef.current, f, accumulator / SIM_STEP);
+        pose = m.mode === 'crew'
+          ? crewPredictionRef.current.smooth(interpolateFlight(prevFlightRef.current, f, crewAccumulator / CREW_STEP), dt)
+          : interpolateFlight(prevFlightRef.current, f, accumulator / SIM_STEP);
 
         // Camera with smooth 1.4s Chase <-> Cockpit transition + camera shake
         const front = forward(pose.yaw, pose.pitch);

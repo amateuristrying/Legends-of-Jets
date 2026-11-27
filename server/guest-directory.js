@@ -1,7 +1,7 @@
 import { bad, reply } from './http.js';
 import { validateRules } from './match.js';
 
-export const SESSION_LIFE = 3 * 60 * 1000;
+export const SESSION_LIFE = 10 * 60 * 1000;
 const ROOM_LIFE = 90 * 60 * 1000;
 const REQUEST_LIFE = 10 * 60 * 1000;
 const SESSION_LIMIT = 35;
@@ -52,8 +52,8 @@ export class GuestDirectory {
     return closedRooms;
   }
 
-  sweep(now) {
-    if (now < this.nextSweep) return;
+  sweep(now, force = false) {
+    if (!force && now < this.nextSweep) return;
     this.nextSweep = now + 15_000;
     for (const room of this.rooms.values()) {
       if (room.expires <= now) this.removeRoom(room);

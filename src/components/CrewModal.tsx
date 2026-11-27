@@ -40,10 +40,8 @@ export const CrewModal: React.FC<Props> = ({
 
   const refresh = async () => {
     try {
-      const ok = await crew.checkStatus();
-      setAvailable(ok);
-      if (!ok) return;
       const home = await crew.home();
+      setAvailable(true);
       setProfile(home);
     } catch (err: unknown) {
       const e = err as { status?: number; message?: string };
@@ -96,7 +94,7 @@ export const CrewModal: React.FC<Props> = ({
           ×
         </button>
 
-        {available === false ? (
+        {!lobby && available === false ? (
           <>
             <span className="eyebrow">CREW MULTIPLAYER</span>
             <h2>Online Play</h2>
@@ -105,7 +103,7 @@ export const CrewModal: React.FC<Props> = ({
               dogfights, use <strong>Skirmish</strong> from the hangar.
             </p>
           </>
-        ) : !profile ? (
+        ) : !lobby && !profile ? (
           <>
             <span className="eyebrow">CREW</span>
             <h2>Pilot Network</h2>
@@ -160,7 +158,7 @@ export const CrewModal: React.FC<Props> = ({
               ))}
             </ul>
             <div className="btn-row">
-              {lobby.host === profile.me.id && lobby.phase !== 'playing' && (
+              {lobby.host === crew.id && lobby.phase !== 'playing' && (
                 <button
                   className="primary"
                   disabled={!lobby.members.every((m) => m.online)}
@@ -181,7 +179,7 @@ export const CrewModal: React.FC<Props> = ({
               >
                 Back to Crew
               </button>
-              {lobby.host === profile.me.id && (
+              {lobby.host === crew.id && (
                 <button
                   className="secondary"
                   onClick={() => runAction(async () => { await crew.closeRoom(); setLobby(null); await refresh(); })}
@@ -191,7 +189,7 @@ export const CrewModal: React.FC<Props> = ({
               )}
             </div>
           </>
-        ) : (
+        ) : profile && (
           <>
             <span className="eyebrow">SQUADRON · PILOT CODE {profile.me.code}</span>
             <h2>Your Crew</h2>

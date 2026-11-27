@@ -1,6 +1,27 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { ARENA_CENTER, ARENA_RADIUS, createMatch, normalizeInput, setMatchInput, snapshot, STEP, tickMatch, validateRules } from '../server/match.js';
+
+test('Crew acknowledges controls only after a tick and rejects stale packets after reconnect', () => {
+  const settings = { seats: 2, mode: 'duel', seconds: 180, difficulty: 'standard', map: 0, night: false };
+  const match = createMatch(settings, [{ id: 'host', plane: 0 }, { id: 'guest', plane: 0 }], 1000);
+  const pilot = match.pilots[0];
+  setMatchInput(match, 'host', { turn: 1, roll: true }, 1010, 4);
+  setMatchInput(match, 'host', { turn: -1 }, 1011, 3);
+  assert.equal(snapshot(match, 1011).pilots[0].inputAck, 0);
+  tickMatch(match, 1025);
+  assert.equal(snapshot(match, 1025).pilots[0].inputAck, 4);
+  assert.equal(pilot.input.turn, 1);
+  assert.ok(pilot.flight.stunt > 0);
+
+  setMatchInput(match, 'host', null, 1030);
+  setMatchInput(match, 'host', { turn: -1 }, 1032, 4);
+  assert.equal(pilot.input.turn, 0);
+  setMatchInput(match, 'host', { turn: -1 }, 1033, 5);
+  tickMatch(match, 1050);
+  assert.equal(snapshot(match, 1050).pilots[0].inputAck, 5);
+  assert.equal(pilot.input.turn, -1);
+});
 import { newFlight } from '../server/sim/flight.js';
 import { newMission, stepMission } from '../server/sim/mission.js';
 import { centralRefuelPosition, planes } from '../server/sim/world.js';
