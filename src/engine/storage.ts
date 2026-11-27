@@ -131,6 +131,16 @@ export function savePilotLog(log: PilotLog): void {
   }
 }
 
+export function resetPilotLog(): PilotLog {
+  const fresh: PilotLog = {
+    ...DEFAULT_PILOT_LOG,
+    campaignProgress: {},
+    bestTimeTrials: {},
+  };
+  savePilotLog(fresh);
+  return fresh;
+}
+
 const RANK_SCORE: Record<MedalRank, number> = { S: 4, A: 3, B: 2, C: 1 };
 
 export function recordCampaignClear(

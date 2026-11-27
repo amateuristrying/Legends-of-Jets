@@ -496,6 +496,19 @@ footer {
   border: 1px solid #fff4;
 }
 
+.danger {
+  padding: 12px 20px;
+  margin: 16px 0 0 10px;
+  border: 1px solid #f15a4a77;
+  color: #ffb2a8;
+}
+
+.danger:hover {
+  background: #f15a4a24;
+  border-color: #f15a4a;
+  color: #ffe0dc;
+}
+
 .btn-row {
   display: flex;
   flex-wrap: wrap;
@@ -504,7 +517,8 @@ footer {
 }
 
 .btn-row .primary,
-.btn-row .secondary {
+.btn-row .secondary,
+.btn-row .danger {
   margin: 0;
 }
 

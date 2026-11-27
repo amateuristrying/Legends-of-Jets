@@ -50,6 +50,7 @@ import {
   findNewlyUnlockedPlanes,
   isPlaneUnlocked,
   recordCampaignClear,
+  resetPilotLog,
 } from './storage';
 import type { CampaignArchetype, ControlInput, GroundTarget, TrailSample } from './types';
 
@@ -507,7 +508,7 @@ describe('Legends of Jets v1.0 Engine', () => {
     const baseH = terrainHeight(landX, landZ, 0);
     expect(baseH).toBeGreaterThan(60);
 
-    // 1) Cannon (tracer): small ~4m radius, ~0.8m chip
+    // 1) Cannon (tracer): small ~6m radius, ~2.4m chip (3x terrain damage)
     const revBefore = getTerrainRevision(0);
     const flight = newFlight(0, [landX, baseH + 120, landZ]);
     const mission = createMission('endless', flight, { map: 0 });
@@ -522,15 +523,21 @@ describe('Legends of Jets v1.0 Engine', () => {
     });
     updateShots(mission, flight, 0, SIM_STEP);
     const tracerDrop = baseH - terrainHeight(landX, landZ, 0);
-    expect(tracerDrop).toBeGreaterThan(0.3);
-    expect(tracerDrop).toBeLessThan(2.0);
+    expect(tracerDrop).toBeGreaterThan(1.5);
+    expect(tracerDrop).toBeLessThan(4.0);
     expect(scorchAt(landX, landZ, 0)).toBeGreaterThan(0.2);
     expect(getTerrainRevision(0)).toBeGreaterThan(revBefore);
 
-    // 2) Rocket: medium ~18m radius, ~10m depth crater
-    const rocketX = landX + 128;
+    // 2) Rocket: medium ~26m radius, ~30m depth crater
+    let rocketX = landX + 128;
+    for (let x = landX + 128; x <= 2400; x += 32) {
+      if (terrainHeight(x, landZ, 0) > 65) {
+        rocketX = x;
+        break;
+      }
+    }
     const rocketBase = terrainHeight(rocketX, landZ, 0);
-    expect(rocketBase).toBeGreaterThan(40);
+    expect(rocketBase).toBeGreaterThan(50);
     mission.shots.push({
       kind: 'rocket',
       pos: [rocketX, rocketBase + 2, landZ],
@@ -542,14 +549,20 @@ describe('Legends of Jets v1.0 Engine', () => {
     });
     updateShots(mission, flight, 0, SIM_STEP);
     const rocketDrop = rocketBase - terrainHeight(rocketX, landZ, 0);
-    expect(rocketDrop).toBeGreaterThan(7);
-    expect(rocketDrop).toBeLessThan(12);
-    expect(solidAt(rocketX, rocketBase - 2, landZ, 0)).toBe(false);
+    expect(rocketDrop).toBeGreaterThan(20);
+    expect(rocketDrop).toBeLessThan(33);
+    expect(solidAt(rocketX, rocketBase - 8, landZ, 0)).toBe(false);
 
-    // 3) Missile: heavy ~34m radius, ~22m depth crater + dirty bounds + RG8 channels
-    const missileX = landX + 256;
+    // 3) Missile: heavy ~48m radius, ~66m depth crater + dirty bounds + RG8 channels
+    let missileX = rocketX + 128;
+    for (let x = rocketX + 128; x <= 3200; x += 32) {
+      if (terrainHeight(x, landZ, 0) > 90) {
+        missileX = x;
+        break;
+      }
+    }
     const missileBase = terrainHeight(missileX, landZ, 0);
-    expect(missileBase).toBeGreaterThan(40);
+    expect(missileBase).toBeGreaterThan(80);
     mission.shots.push({
       kind: 'missile',
       pos: [missileX, missileBase + 2, landZ],
@@ -561,9 +574,9 @@ describe('Legends of Jets v1.0 Engine', () => {
     });
     updateShots(mission, flight, 0, SIM_STEP);
     const missileDrop = missileBase - terrainHeight(missileX, landZ, 0);
-    expect(missileDrop).toBeGreaterThan(rocketDrop + 6);
-    expect(missileDrop).toBeLessThanOrEqual(22.5);
-    expect(solidAt(missileX, missileBase - 8, landZ, 0)).toBe(false);
+    expect(missileDrop).toBeGreaterThan(rocketDrop + 20);
+    expect(missileDrop).toBeLessThanOrEqual(66.5);
+    expect(solidAt(missileX, missileBase - 25, landZ, 0)).toBe(false);
 
     const dirty = consumeTerrainDirty(0);
     expect(dirty.bounds).not.toBeNull();
@@ -862,5 +875,20 @@ describe('Legends of Jets v1.0 Engine', () => {
 
       expect(mission.phase, `Archetype ${archetype} did not complete`).toBe('complete');
     }
+  });
+
+  it('resetPilotLog restores default pilot log and re-locks unlockable airframes', () => {
+    let progressed = { ...DEFAULT_PILOT_LOG, totalKills: 30, totalSorties: 8, campaignProgress: {}, bestTimeTrials: {} };
+    progressed = recordCampaignClear(progressed, 1, 75, 'S');
+    expect(isPlaneUnlocked(3, progressed)).toBe(true);
+
+    const reset = resetPilotLog();
+    expect(reset.totalKills).toBe(0);
+    expect(reset.totalSorties).toBe(0);
+    expect(Object.keys(reset.campaignProgress)).toHaveLength(0);
+    expect(Object.keys(reset.bestTimeTrials)).toHaveLength(0);
+    expect(isPlaneUnlocked(3, reset)).toBe(false);
+    expect(isPlaneUnlocked(4, reset)).toBe(false);
+    expect(isPlaneUnlocked(0, reset)).toBe(true);
   });
 });

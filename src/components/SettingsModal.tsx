@@ -5,6 +5,7 @@ import { DEFAULT_BINDINGS } from '../engine/storage';
 interface Props {
   settings: GameSettings;
   onUpdate: (patch: Partial<GameSettings>) => void;
+  onResetProgress: () => void;
   onClose: () => void;
 }
 
@@ -32,8 +33,14 @@ const BINDING_LABELS: Array<[keyof KeyBindings, string]> = [
   ['map', 'Minimap'],
 ];
 
-export const SettingsModal: React.FC<Props> = ({ settings, onUpdate, onClose }) => {
+export const SettingsModal: React.FC<Props> = ({
+  settings,
+  onUpdate,
+  onResetProgress,
+  onClose,
+}) => {
   const [capturing, setCapturing] = useState<keyof KeyBindings | null>(null);
+  const [confirmReset, setConfirmReset] = useState(false);
 
   useEffect(() => {
     if (!capturing) return;
@@ -237,6 +244,26 @@ export const SettingsModal: React.FC<Props> = ({ settings, onUpdate, onClose }) 
           >
             Reset Keys
           </button>
+          {confirmReset ? (
+            <>
+              <button
+                className="danger"
+                onClick={() => {
+                  onResetProgress();
+                  setConfirmReset(false);
+                }}
+              >
+                Confirm Reset Progress
+              </button>
+              <button className="secondary" onClick={() => setConfirmReset(false)}>
+                Cancel
+              </button>
+            </>
+          ) : (
+            <button className="danger" onClick={() => setConfirmReset(true)}>
+              Reset Progress
+            </button>
+          )}
         </div>
       </div>
     </div>

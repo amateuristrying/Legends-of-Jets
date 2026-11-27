@@ -909,7 +909,7 @@ export function carveLandmark(
   );
   if (existing) {
     existing.scorch = Math.max(existing.scorch, scorch);
-    existing.radius = Math.min(48, existing.radius + radius * 0.25);
+    existing.radius = Math.min(64, existing.radius + radius * 0.25);
   } else {
     if (carves.length >= 128) carves.shift();
     carves.push({ x: lx, y, z: lz, radius, scorch });

@@ -11,9 +11,9 @@ An atmospheric **WebGL2** aerial combat and free-flight game built with **Vite +
   * **Ember Canyon (*Ashmouth Caldera*)**: Sandstone canyons surrounding an **active volcano** at `[0, 0]` with molten lava crust, glowing magma veins, rising ember/smoke plumes, and four flyable cardinal tunnels.
   * **Frostline Reach (*Glacier Vault*)**: Arctic peaks and glacial channels surrounding a **dormant volcano** at `[0, 0]` with cooled obsidian rock, interior frost shelves, a cathedral skylight, and four flyable tunnels.
 * **Weapon-Scaled Terrain & Landmark Destruction**: Real-time dual-channel `gl.RG8` heightmap & scorch streaming (`gl.texSubImage2D`) synced with CPU collision and minimap elevation tiles:
-  * **Cannon**: `4m` micro-impact chips & scorch marks.
-  * **Rockets**: `18m` blast craters & volcano wall carving.
-  * **Missiles**: `34m` deep craters, glowing ember/dark-basalt scorch rims, shockwave debris, and localized landmark carving.
+  * **Cannon**: `6m` micro-impact chips (`2.4m` depth) & scorch marks.
+  * **Rockets**: `26m` blast craters (`30m` depth) & volcano wall carving.
+  * **Missiles**: `48m` deep craters (`66m` depth), glowing ember/dark-basalt scorch rims, shockwave debris, and localized landmark carving.
   * **Target Ruins**: Destroyed radar, AA, relay, and core ground installations leave smoking, charred ruins on the battlefield.
 
 ### Flight Physics, Fuel & Combat Systems

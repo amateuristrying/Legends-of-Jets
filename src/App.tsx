@@ -43,6 +43,7 @@ import {
   loadPilotLog,
   loadSettings,
   recordCampaignClear,
+  resetPilotLog,
   savePilotLog,
   saveSettings,
 } from './engine/storage';
@@ -1657,6 +1658,18 @@ export const App: React.FC = () => {
         <SettingsModal
           settings={settings}
           onUpdate={updateSettings}
+          onResetProgress={() => {
+            const fresh = resetPilotLog();
+            setPilotLog(fresh);
+            setNewlyUnlockedPlanes([]);
+            setSettings((prev) => {
+              if (isPlaneUnlocked(prev.plane, fresh)) return prev;
+              const next = { ...prev, plane: 0 };
+              saveSettings(next);
+              return next;
+            });
+            showToast('Pilot log, campaign progress, and unlocks reset.');
+          }}
           onClose={() => setModal(null)}
         />
       )}

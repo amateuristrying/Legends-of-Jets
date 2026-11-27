@@ -35,11 +35,11 @@ export const WEAPON_IMPACT_PROFILES: Record<
   ShotEntity['kind'],
   { radius: number; depth: number; scorch: number; landmarkCarve: number }
 > = {
-  tracer: { radius: 4, depth: 0.8, scorch: 0.35, landmarkCarve: 0 },
-  enemyTracer: { radius: 4, depth: 0.6, scorch: 0.3, landmarkCarve: 0 },
-  rocket: { radius: 18, depth: 10, scorch: 0.72, landmarkCarve: 14 },
-  missile: { radius: 34, depth: 22, scorch: 1.0, landmarkCarve: 22 },
-  enemyMissile: { radius: 34, depth: 22, scorch: 1.0, landmarkCarve: 22 },
+  tracer: { radius: 6, depth: 2.4, scorch: 0.45, landmarkCarve: 0 },
+  enemyTracer: { radius: 6, depth: 1.8, scorch: 0.4, landmarkCarve: 0 },
+  rocket: { radius: 26, depth: 30, scorch: 0.82, landmarkCarve: 24 },
+  missile: { radius: 48, depth: 66, scorch: 1.0, landmarkCarve: 38 },
+  enemyMissile: { radius: 48, depth: 66, scorch: 1.0, landmarkCarve: 38 },
 };
 
 export const HOSTILE_TINT: Vec3 = [0.86, 0.23, 0.21];
@@ -1010,7 +1010,7 @@ export function updateShots(
           if (gt.hp <= 0) {
             gt.destroyed = true;
             gt.fireCooldown = 0;
-            applyTerrainImpact(gt.pos[0], gt.pos[2], 14, 3, 0.85, map);
+            applyTerrainImpact(gt.pos[0], gt.pos[2], 22, 9, 0.92, map);
             explosionBurst(mission, gt.pos, true);
             pushKillFeed(mission, `${shot.ownerName ?? 'HOSTILE'} ✕ ${gt.name}`, '#ff7d6e');
             tell(mission, `${gt.name.toUpperCase()} DESTROYED!`);
@@ -1074,7 +1074,7 @@ export function updateShots(
         gt.fireCooldown = 0;
         mission.groundKills++;
         groundKillsDelta++;
-        applyTerrainImpact(gt.pos[0], gt.pos[2], 14, 3, 0.85, map);
+        applyTerrainImpact(gt.pos[0], gt.pos[2], 22, 9, 0.92, map);
         explosionBurst(mission, gt.pos, true);
         pushKillFeed(mission, `${shot.ownerName ?? 'YOU'} ✕ ${gt.name}`, '#ffd37a');
         tell(mission, `TARGET DESTROYED • ${gt.name}`);
