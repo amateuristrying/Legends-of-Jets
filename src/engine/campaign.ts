@@ -9,9 +9,9 @@ export interface RelayDef {
 }
 
 export const RELAYS: RelayDef[] = [
-  { id: 'A', name: 'Ridge Station', pos: [-960, 0, 510], detail: 'A ridge repeater west of the caldera.' },
-  { id: 'B', name: 'Caldera Beacon', pos: [0, 0, VOLCANO.z - 320], detail: 'A short-range beacon at Ashmouth’s south entrance.' },
-  { id: 'C', name: 'Needle Array', pos: [895, 0, 1580], detail: 'A relay tower beyond the eastern peaks.' },
+  { id: 'A', name: 'Ridge Station', pos: [-960, 0, -180], detail: 'A ridge repeater west of the caldera.' },
+  { id: 'B', name: 'Caldera Beacon', pos: [0, 0, VOLCANO.z - 410], detail: 'A short-range beacon at Ashmouth’s south entrance.' },
+  { id: 'C', name: 'Needle Array', pos: [895, 0, 520], detail: 'A relay tower beyond the eastern peaks.' },
 ];
 
 export function relayPosition(relay: RelayDef, map = 0): Vec3 {
@@ -32,7 +32,7 @@ export const CAMPAIGN_LEVELS: CampaignLevel[] = [
     briefing:
       'Fly into Ember Canyon in a three-plane formation. Watch your six—unidentified Obsidian Wing contacts have been probing the Red Frontier.',
     objectiveLabel: 'SURVIVE AMBUSH & RESTORE RELAY',
-    spawnPos: [0, 555, -420],
+    spawnPos: [0, 555, -820],
     enemyCount: 5,
     allyCount: 2,
     parTimeSec: 110,
@@ -54,7 +54,7 @@ export const CAMPAIGN_LEVELS: CampaignLevel[] = [
     briefing:
       'Link up with new wingman Kestrel and clear six Obsidian scout fighters patrolling the sandstone river gorge.',
     objectiveLabel: 'CLEAR 6 OBSIDIAN SCOUTS',
-    spawnPos: [0, 290, -260],
+    spawnPos: [0, 340, -900],
     enemyCount: 6,
     allyCount: 1,
     parTimeSec: 120,
@@ -76,7 +76,7 @@ export const CAMPAIGN_LEVELS: CampaignLevel[] = [
     briefing:
       'Obsidian strikers are converging on Ridge Station at sunset. Intercept two waves before they knock Command offline again.',
     objectiveLabel: 'DEFEND RIDGE STATION (2 WAVES)',
-    spawnPos: [-820, 320, 260],
+    spawnPos: [-820, 380, -520],
     enemyCount: 4,
     allyCount: 1,
     waves: 2,
@@ -122,7 +122,7 @@ export const CAMPAIGN_LEVELS: CampaignLevel[] = [
     briefing:
       'Slip beneath Obsidian long-range radar by staying below 220m AGL until you reach the canyon checkpoints, then clear the interceptors.',
     objectiveLabel: 'STAY UNDER 220M & PASS 6 RINGS',
-    spawnPos: [0, 140, -520],
+    spawnPos: [560, 260, -820],
     enemyCount: 4,
     allyCount: 0,
     ringCount: 6,
@@ -146,7 +146,7 @@ export const CAMPAIGN_LEVELS: CampaignLevel[] = [
     briefing:
       'Ace commander "Cinder-1" is holding the skies above Ashmouth Caldera with four escorts. Break the Red Frontier blockade.',
     objectiveLabel: 'DEFEAT ACE CINDER-1 & ESCORTS',
-    spawnPos: [0, 420, 420],
+    spawnPos: [0, 440, -680],
     enemyCount: 4,
     allyCount: 1,
     bossName: 'CINDER-1',
@@ -172,7 +172,7 @@ export const CAMPAIGN_LEVELS: CampaignLevel[] = [
     briefing:
       'Welcome to Frostline Reach. Clear six Obsidian patrol fighters guarding the broken glacier shelves.',
     objectiveLabel: 'CLEAR 6 GLACIER PATROLS',
-    spawnPos: [-205, 310, -180],
+    spawnPos: [-480, 360, -760],
     enemyCount: 6,
     allyCount: 1,
     parTimeSec: 130,
@@ -194,7 +194,7 @@ export const CAMPAIGN_LEVELS: CampaignLevel[] = [
     briefing:
       'Fly a high-speed recon run through eight glacial waypoints in storm visibility to map Obsidian’s northern supply lanes.',
     objectiveLabel: 'FLY THROUGH 8 RECON RINGS',
-    spawnPos: [-120, 210, -240],
+    spawnPos: [-580, 280, -760],
     enemyCount: 2,
     allyCount: 0,
     ringCount: 8,
@@ -218,7 +218,7 @@ export const CAMPAIGN_LEVELS: CampaignLevel[] = [
     briefing:
       'Escort two allied supply aircraft crossing Frostline Reach while fending off two waves of hostile interceptors.',
     objectiveLabel: 'PROTECT ESCORT FLIGHT (2 WAVES)',
-    spawnPos: [0, 260, -320],
+    spawnPos: [520, 310, -780],
     enemyCount: 4,
     allyCount: 2,
     waves: 2,
@@ -241,7 +241,7 @@ export const CAMPAIGN_LEVELS: CampaignLevel[] = [
     briefing:
       'Track and neutralize five stealth-tinted Obsidian scouts operating under arctic night cover. Rely on your tactical radar and RWR.',
     objectiveLabel: 'HUNT 5 NIGHT SCOUTS',
-    spawnPos: [-160, 340, -120],
+    spawnPos: [-520, 380, -640],
     enemyCount: 5,
     allyCount: 0,
     parTimeSec: 135,
@@ -286,7 +286,7 @@ export const CAMPAIGN_LEVELS: CampaignLevel[] = [
     briefing:
       'Beneath the Arctic Aurora, elite Ace "Glacier-1" and four Veteran wingmen scramble to stop our northern advance.',
     objectiveLabel: 'DEFEAT ACE GLACIER-1 UNDER AURORA',
-    spawnPos: [140, 410, 320],
+    spawnPos: [480, 420, -620],
     enemyCount: 4,
     allyCount: 1,
     bossName: 'GLACIER-1',
@@ -312,7 +312,7 @@ export const CAMPAIGN_LEVELS: CampaignLevel[] = [
     briefing:
       'Obsidian rebuilt four hilltop radar domes and AA batteries across Ember Canyon. Use unguided rockets (X) and cannon runs to level them.',
     objectiveLabel: 'DESTROY 4 RADAR & AA SITES',
-    spawnPos: [-320, 320, -280],
+    spawnPos: [-620, 360, -680],
     enemyCount: 3,
     allyCount: 1,
     groundTargets: 4,
@@ -335,7 +335,7 @@ export const CAMPAIGN_LEVELS: CampaignLevel[] = [
     briefing:
       'Use Ashmouth’s night-time heat plume to ambush a six-ship heavy flight crossing the crater.',
     objectiveLabel: 'AMBUSH 6 HEAVY FIGHTERS',
-    spawnPos: [0, 360, 560],
+    spawnPos: [0, 380, -660],
     enemyCount: 6,
     allyCount: 1,
     parTimeSec: 145,
@@ -357,7 +357,7 @@ export const CAMPAIGN_LEVELS: CampaignLevel[] = [
     briefing:
       'A classic 2v6 sunset furball over Ember Canyon. Watch Kestrel’s six and keep your energy up.',
     objectiveLabel: 'WIN 2V6 CANYON DOGFIGHT',
-    spawnPos: [180, 390, -140],
+    spawnPos: [520, 390, -580],
     enemyCount: 6,
     allyCount: 1,
     parTimeSec: 155,
@@ -379,7 +379,7 @@ export const CAMPAIGN_LEVELS: CampaignLevel[] = [
     briefing:
       'Race through ten sandstone gorge checkpoints against the clock while dodging AA batteries and pursuing fighters.',
     objectiveLabel: 'CLEAR 10 CANYON CHECKPOINTS',
-    spawnPos: [0, 175, -500],
+    spawnPos: [560, 260, -820],
     enemyCount: 3,
     allyCount: 0,
     groundTargets: 2,
@@ -427,7 +427,7 @@ export const CAMPAIGN_LEVELS: CampaignLevel[] = [
     briefing:
       'Obsidian experimental Ace "Pyre" has launched in a twin-boom Valkyrie prototype with five Veteran escorts.',
     objectiveLabel: 'DEFEAT ACE PYRE & ESCORTS',
-    spawnPos: [-140, 440, 340],
+    spawnPos: [-480, 440, -640],
     enemyCount: 5,
     allyCount: 2,
     bossName: 'PYRE',
@@ -453,7 +453,7 @@ export const CAMPAIGN_LEVELS: CampaignLevel[] = [
     briefing:
       'High-altitude Spectre SU-27 raiders are diving over Frostline peaks. Climb fast and intercept all six.',
     objectiveLabel: 'INTERCEPT 6 HIGH-ALT RAIDERS',
-    spawnPos: [-220, 520, -240],
+    spawnPos: [-540, 520, -680],
     enemyCount: 6,
     allyCount: 1,
     parTimeSec: 145,
@@ -475,7 +475,7 @@ export const CAMPAIGN_LEVELS: CampaignLevel[] = [
     briefing:
       'Dismantle five fortified arctic AA and radar installations across Frostline’s peaks under heavy overcast.',
     objectiveLabel: 'DESTROY 5 ARCTIC STATIONS',
-    spawnPos: [-300, 310, -180],
+    spawnPos: [-580, 350, -640],
     enemyCount: 4,
     allyCount: 1,
     groundTargets: 5,
@@ -498,7 +498,7 @@ export const CAMPAIGN_LEVELS: CampaignLevel[] = [
     briefing:
       'Six elite stealth interceptors are hunting under the Aurora. Use tight lead-pursuit gunnery when locks drop.',
     objectiveLabel: 'CLEAR 6 STEALTH INTERCEPTORS',
-    spawnPos: [80, 380, -160],
+    spawnPos: [480, 380, -620],
     enemyCount: 6,
     allyCount: 1,
     parTimeSec: 160,
@@ -543,7 +543,7 @@ export const CAMPAIGN_LEVELS: CampaignLevel[] = [
     briefing:
       'Hold Frostline Reach through three escalating waves. Fly through glowing green rearm rings between waves to restore hull and missiles.',
     objectiveLabel: 'SURVIVE 3 ESCALATING WAVES',
-    spawnPos: [0, 350, -120],
+    spawnPos: [-480, 380, -620],
     enemyCount: 4,
     allyCount: 1,
     waves: 3,
@@ -566,7 +566,7 @@ export const CAMPAIGN_LEVELS: CampaignLevel[] = [
     briefing:
       'Confront the elite "Subzero" Ace flight over the frozen sea. Expect coordinated missile volleys and flare countermeasures.',
     objectiveLabel: 'DEFEAT ACE SUBZERO & FLIGHT',
-    spawnPos: [200, 420, 260],
+    spawnPos: [480, 420, -620],
     enemyCount: 4,
     allyCount: 2,
     bossName: 'SUBZERO',
@@ -592,7 +592,7 @@ export const CAMPAIGN_LEVELS: CampaignLevel[] = [
     briefing:
       'Combined-arms strike in an Ember Canyon storm: destroy three command radar towers and clear six defending fighters.',
     objectiveLabel: 'DESTROY 3 TOWERS & 6 DEFENDERS',
-    spawnPos: [-240, 330, -340],
+    spawnPos: [-560, 360, -660],
     enemyCount: 6,
     allyCount: 2,
     groundTargets: 3,
@@ -662,7 +662,7 @@ export const CAMPAIGN_LEVELS: CampaignLevel[] = [
     briefing:
       'Obsidian activated six blackout relays across Ember Canyon. Destroy all six before the 180-second jamming countdown hits zero.',
     objectiveLabel: 'DESTROY 6 RELAYS BEFORE BLACKOUT',
-    spawnPos: [0, 360, -280],
+    spawnPos: [0, 380, -760],
     enemyCount: 5,
     allyCount: 1,
     groundTargets: 6,
@@ -686,7 +686,7 @@ export const CAMPAIGN_LEVELS: CampaignLevel[] = [
     briefing:
       'Survive four relentless waves of Obsidian’s finest pilots over Frostline Reach alongside two allied wingmen.',
     objectiveLabel: 'SURVIVE 4 ACE WAVES',
-    spawnPos: [-120, 390, -180],
+    spawnPos: [-480, 390, -640],
     enemyCount: 4,
     allyCount: 2,
     waves: 4,
@@ -709,7 +709,7 @@ export const CAMPAIGN_LEVELS: CampaignLevel[] = [
     briefing:
       'The final duel above Ashmouth Caldera. Take down Commander "Sovereign" and his elite Obsidian Ace squadron to end the war.',
     objectiveLabel: 'DEFEAT COMMANDER SOVEREIGN',
-    spawnPos: [0, 460, 360],
+    spawnPos: [0, 480, -680],
     enemyCount: 6,
     allyCount: 2,
     bossName: 'SOVEREIGN',

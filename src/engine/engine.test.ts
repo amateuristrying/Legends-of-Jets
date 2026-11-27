@@ -3,12 +3,16 @@ import {
   AIRCRAFT_WING_GEOMETRY,
   aircraftBasis,
   centralRefuelPosition,
+  ELEVATION_STEP,
   GLACIER_VAULT,
   glacierDensity,
   planes,
   pruneTrail,
   recordTrailSample,
+  sampleElevationWindow,
   solidAt,
+  TERRAIN_SIZE,
+  terrainHeight,
   TRAIL_MAX_AGE,
   VOLCANO,
   volcanoDensity,
@@ -17,8 +21,15 @@ import {
   wingtipPositions,
 } from './world';
 import { interpolateFlight, newFlight, SIM_STEP, stepFlight } from './flight';
-import { CAMPAIGN_LEVELS } from './campaign';
-import { computeRank, createMission, selectRelay, stepMission } from './modes';
+import { CAMPAIGN_LEVELS, RELAYS, relayPosition } from './campaign';
+import {
+  buildCalderaRings,
+  buildGlacierRings,
+  computeRank,
+  createMission,
+  selectRelay,
+  stepMission,
+} from './modes';
 import { Radar } from './radar';
 import { isPlaneUnlocked, DEFAULT_PILOT_LOG } from './storage';
 import type { ControlInput, TrailSample } from './types';
@@ -95,7 +106,7 @@ describe('Legends of Jets v1.0 Engine', () => {
   });
 
   it('runs Dead Air (Level 1) through ambush, combat, jamming, and relay selection', () => {
-    const flight = newFlight(0, [0, 555, -420]);
+    const flight = newFlight(0, CAMPAIGN_LEVELS[0].spawnPos);
     const mission = createMission('story', flight, { levelId: 1 });
     expect(mission.phase).toBe('ambush');
     expect(mission.allies).toHaveLength(2);
@@ -374,6 +385,91 @@ describe('Legends of Jets v1.0 Engine', () => {
       expect(mission.arms.flaresLeft).toBe(planes[2].flares);
       expect(mission.arms.overheated).toBe(false);
       expect(mission.message).toMatch(/VOLCANO CORE DEPOT/i);
+    }
+  });
+
+  it('generates non-repeating procedural terrain across distant coordinates without tile wrapping', () => {
+    for (const map of [0, 1] as const) {
+      let diffsAt4096 = 0;
+      let diffsAt8192 = 0;
+      for (let i = 0; i < 12; i++) {
+        const x = 640 + i * 232;
+        const z = -960 + i * 312;
+        const h0 = terrainHeight(x, z, map);
+        const h1 = terrainHeight(x + TERRAIN_SIZE, z, map);
+        const h2 = terrainHeight(x, z + TERRAIN_SIZE, map);
+        const h3 = terrainHeight(x + 8192, z - 4096, map);
+        if (Math.abs(h0 - h1) > 1 || Math.abs(h0 - h2) > 1) diffsAt4096++;
+        if (Math.abs(h0 - h3) > 1) diffsAt8192++;
+      }
+      expect(diffsAt4096).toBeGreaterThanOrEqual(10);
+      expect(diffsAt8192).toBeGreaterThanOrEqual(10);
+
+      const winA = sampleElevationWindow(map, -512, -512, 64, ELEVATION_STEP);
+      const winB = sampleElevationWindow(map, -512 + TERRAIN_SIZE, -512, 64, ELEVATION_STEP);
+      let windowDiffs = 0;
+      for (let i = 0; i < winA.length; i++) {
+        if (winA[i] !== winB[i]) windowDiffs++;
+      }
+      expect(windowDiffs).toBeGreaterThan(winA.length * 0.7);
+    }
+  });
+
+  it('centers both Active (Map 0) and Dormant (Map 1) volcanoes at [0, 0] with 4 flyable cardinal tunnels', () => {
+    expect(VOLCANO.x).toBe(0);
+    expect(VOLCANO.z).toBe(0);
+    expect(GLACIER_VAULT.x).toBe(0);
+    expect(GLACIER_VAULT.z).toBe(0);
+    expect(centralRefuelPosition(0)).toEqual([0, VOLCANO.tunnelAltitude, 0]);
+    expect(centralRefuelPosition(1)).toEqual([0, GLACIER_VAULT.tunnelAltitude, 0]);
+
+    for (const map of [0, 1] as const) {
+      const alt = map === 0 ? VOLCANO.tunnelAltitude : GLACIER_VAULT.tunnelAltitude;
+      for (const [dx, dz] of [
+        [0, -1],
+        [0, 1],
+        [-1, 0],
+        [1, 0],
+      ]) {
+        for (let step = 0; step <= 450; step += 15) {
+          expect(solidAt(dx * step, alt, dz * step, map, 7)).toBe(false);
+        }
+      }
+      expect(solidAt(135, alt, 145, map)).toBe(true);
+      expect(solidAt(-135, alt, -145, map)).toBe(true);
+      expect(solidAt(0, 30, 0, map)).toBe(true);
+    }
+
+    // Active Volcano (Map 0) emits rising ember/smoke particles near [0, 0]; Dormant (Map 1) does not
+    const f0 = newFlight(0, [0, 260, -680]);
+    const m0 = createMission('endless', f0, { map: 0 });
+    for (let i = 0; i < 60; i++) stepMission(m0, f0, IDLE, 0, 1 / 30);
+    expect(m0.effects.some((e) => e.kind === 'fire' || e.kind === 'spark' || e.kind === 'smoke')).toBe(true);
+
+    const f1 = newFlight(0, [-420, 280, -640]);
+    const m1 = createMission('endless', f1, { map: 1 });
+    for (let i = 0; i < 60; i++) stepMission(m1, f1, IDLE, 1, 1 / 30);
+    expect(m1.effects).toHaveLength(0);
+  });
+
+  it('re-anchors all campaign spawns, time-trial rings, and relays safely without terrain collisions', () => {
+    for (const lvl of CAMPAIGN_LEVELS) {
+      expect(
+        solidAt(lvl.spawnPos[0], lvl.spawnPos[1], lvl.spawnPos[2], lvl.map, 10),
+        `Level ${lvl.id} (${lvl.title}) spawnPos collision`
+      ).toBe(false);
+    }
+
+    for (const ring of buildCalderaRings()) {
+      expect(solidAt(ring.pos[0], ring.pos[1], ring.pos[2], 0, 5), `Caldera ring ${ring.id}`).toBe(false);
+    }
+    for (const ring of buildGlacierRings()) {
+      expect(solidAt(ring.pos[0], ring.pos[1], ring.pos[2], 1, 5), `Glacier ring ${ring.id}`).toBe(false);
+    }
+
+    for (const relay of RELAYS) {
+      const pos = relayPosition(relay, 0);
+      expect(solidAt(pos[0], pos[1], pos[2], 0, 5), `Relay ${relay.id}`).toBe(false);
     }
   });
 });

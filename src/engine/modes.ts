@@ -44,12 +44,13 @@ export function buildCalderaRings(): RingCheckpoint[] {
   const vy = VOLCANO.tunnelAltitude;
   const vx = VOLCANO.x;
   const vz = VOLCANO.z;
+  const outsideY = Math.max(vy + 35, height(vx + 390, vz + 160, 0) + 55);
   return [
     { id: 1, pos: [vx, vy, vz - 320], radius: 44, passed: false },
     { id: 2, pos: [vx, vy, vz - 150], radius: 44, passed: false },
     { id: 3, pos: [vx + 65, vy + 10, vz], radius: 48, passed: false },
     { id: 4, pos: [vx + 220, vy, vz], radius: 44, passed: false },
-    { id: 5, pos: [vx + 390, vy + 35, vz + 160], radius: 52, passed: false },
+    { id: 5, pos: [vx + 390, outsideY, vz + 160], radius: 52, passed: false },
     { id: 6, pos: [vx, vy, vz + 320], radius: 44, passed: false },
     { id: 7, pos: [vx - 70, vy + 8, vz], radius: 48, passed: false },
     { id: 8, pos: [vx - 260, vy, vz], radius: 44, passed: false },
@@ -60,23 +61,31 @@ export function buildGlacierRings(): RingCheckpoint[] {
   const gy = GLACIER_VAULT.tunnelAltitude;
   const gx = GLACIER_VAULT.x;
   const gz = GLACIER_VAULT.z;
+  const outsideY = Math.max(gy + 85, height(gx + 160, gz + 260, 1) + 55);
   return [
     { id: 1, pos: [gx, gy, gz - 300], radius: 46, passed: false },
     { id: 2, pos: [gx, gy, gz - 120], radius: 46, passed: false },
     { id: 3, pos: [gx + 75, gy + 12, gz], radius: 50, passed: false },
     { id: 4, pos: [gx + 240, gy, gz], radius: 46, passed: false },
-    { id: 5, pos: [gx + 160, gy + 85, gz + 260], radius: 54, passed: false },
+    { id: 5, pos: [gx + 160, outsideY, gz + 260], radius: 54, passed: false },
     { id: 6, pos: [gx, gy, gz + 290], radius: 46, passed: false },
     { id: 7, pos: [gx - 65, gy + 10, gz], radius: 50, passed: false },
     { id: 8, pos: [gx - 240, gy, gz], radius: 46, passed: false },
   ];
 }
 
-function buildCanyonRings(count: number, map: number, lowCeiling?: number): RingCheckpoint[] {
+function buildCanyonRings(
+  count: number,
+  map: number,
+  lowCeiling?: number,
+  anchorPos?: Vec3
+): RingCheckpoint[] {
   const rings: RingCheckpoint[] = [];
+  const baseX = anchorPos ? anchorPos[0] : map === 1 ? -580 : 560;
+  const baseZ = anchorPos ? anchorPos[2] + 260 : -540;
   for (let i = 0; i < count; i++) {
-    const z = -220 + i * 240;
-    const x = Math.sin(i * 0.85) * 280 + (map === 1 ? -80 : 0);
+    const z = baseZ + i * 240;
+    const x = baseX + Math.sin(i * 0.85) * 180;
     const ground = height(x, z, map);
     const y = lowCeiling ? Math.min(ground + lowCeiling - 45, ground + 115) : ground + 120 + (i % 3) * 35;
     rings.push({ id: i + 1, pos: [x, Math.max(95, y), z], radius: 52, passed: false });
@@ -116,7 +125,7 @@ function buildGroundTargets(level: CampaignLevel): GroundTarget[] {
     const angle = (i / count) * Math.PI * 2 + 0.4;
     const radius = 520 + (i % 2) * 320;
     const x = Math.cos(angle) * radius;
-    const z = 420 + Math.sin(angle) * radius;
+    const z = Math.sin(angle) * radius;
     const y = height(x, z, level.map) + 8;
     const kind: GroundTarget['kind'] =
       level.archetype === 'relay-blitz'
@@ -282,7 +291,7 @@ export function createMission(
         base.rings =
           level.id === 26
             ? buildCalderaRings()
-            : buildCanyonRings(level.ringCount, level.map, level.ceilingLimit);
+            : buildCanyonRings(level.ringCount, level.map, level.ceilingLimit, level.spawnPos);
       }
       if (level.archetype === 'survival') {
         base.rings = [spawnRearmRing(flight, level.map)];
@@ -469,6 +478,25 @@ export function stepMission(
   stepGroundTargets(mission, flight, map, dt);
   const sEvents = updateShots(mission, flight, map, dt);
   mission.target = acquireTarget(mission.enemies, mission.groundTargets, flight);
+
+  // Active Volcano (Map 0) rising ember & volcanic smoke plume particles at [0, 0]
+  if (
+    map === 0 &&
+    mission.effects.length < 220 &&
+    dist3(flight.pos, [VOLCANO.x, VOLCANO.tunnelAltitude, VOLCANO.z]) < 2800 &&
+    Math.random() < dt * 11
+  ) {
+    const a = Math.random() * Math.PI * 2;
+    const r = Math.random() * 88;
+    const isEmber = Math.random() < 0.58;
+    mission.effects.push({
+      kind: isEmber ? (Math.random() < 0.5 ? 'spark' : 'fire') : 'smoke',
+      pos: [VOLCANO.x + Math.cos(a) * r, 58 + Math.random() * 14, VOLCANO.z + Math.sin(a) * r],
+      velocity: [(Math.random() - 0.5) * 14, isEmber ? 42 + Math.random() * 34 : 32 + Math.random() * 24, (Math.random() - 0.5) * 14],
+      life: isEmber ? 2.4 + Math.random() * 1.4 : 4.2 + Math.random() * 1.8,
+      size: isEmber ? 4.5 + Math.random() * 3.5 : 14 + Math.random() * 10,
+    });
+  }
 
   for (const item of mission.effects) {
     item.pos = add(item.pos, scale(item.velocity, dt));

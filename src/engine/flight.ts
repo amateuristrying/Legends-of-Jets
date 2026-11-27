@@ -7,7 +7,7 @@ export const views = ['Chase', 'Cockpit'] as const;
 const approach = (current: number, target: number, rate: number, dt: number): number =>
   mix(current, target, 1 - Math.exp(-rate * dt));
 
-export function newFlight(type: number, position: Vec3 = [0, 126, -45]): FlightState {
+export function newFlight(type: number, position: Vec3 = [0, 260, -680]): FlightState {
   const plane = planes[type] ?? planes[0];
   return {
     type: plane.id,

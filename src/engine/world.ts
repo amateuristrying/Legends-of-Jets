@@ -21,7 +21,7 @@ export const maps: MapSpec[] = [
     region: 'THE NORTHERN FRONT',
     landmarkName: 'Glacier Vault',
     description:
-      'Broken glacier shelves, snow peaks, and the subterranean Glacier Vault carved through solid arctic ice.',
+      'Broken glacier shelves, snow peaks, and the dormant Glacier Vault caldera carved through cooled obsidian and arctic ice.',
   },
 ];
 
@@ -250,8 +250,8 @@ export function recordTrailSample(
   return simTime;
 }
 
-export const VOLCANO = { x: 0, z: 1080, radius: 360, tunnelAltitude: 137 };
-export const GLACIER_VAULT = { x: 240, z: 980, radius: 330, tunnelAltitude: 124 };
+export const VOLCANO = { x: 0, z: 0, radius: 360, tunnelAltitude: 137 };
+export const GLACIER_VAULT = { x: 0, z: 0, radius: 330, tunnelAltitude: 124 };
 export const CENTRAL_REFUEL_RADIUS = 54;
 
 export function centralRefuelPosition(map: number): Vec3 {
@@ -263,110 +263,247 @@ export const TERRAIN_SIZE = 4096;
 export const TERRAIN_TEXELS = 1024;
 export const TERRAIN_HEIGHT = 640;
 export const TERRAIN_GRID = 8;
+export const ELEVATION_SPAN = 8192;
+export const ELEVATION_TEXELS = 1024;
+export const ELEVATION_STEP = ELEVATION_SPAN / ELEVATION_TEXELS;
 
+const CHUNK_CELLS = 16;
+const CHUNK_SIZE = CHUNK_CELLS * TERRAIN_GRID;
+const MAX_CACHED_CHUNKS = 6000;
+const chunkCaches: Array<Map<string, Uint8Array>> = [new Map(), new Map()];
 const tiles: Array<Uint8Array | undefined> = [];
-const mask = TERRAIN_TEXELS - 1;
-const smooth = (t: number): number => t * t * (3 - 2 * t);
 
-function noise(x: number, z: number, period: number, seed: number): number {
+const smooth = (t: number): number => t * t * (3 - 2 * t);
+const fade = (t: number): number => t * t * t * (t * (t * 6 - 15) + 10);
+
+// Aperiodic 2D integer-lattice hash (never wraps via period bitmask)
+function hash2D(ix: number, iz: number, seed: number): number {
+  let h =
+    Math.imul(ix | 0, 374761393) +
+    Math.imul(iz | 0, 668265263) +
+    Math.imul(seed | 0, 1442695041);
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967295;
+}
+
+// Continuous aperiodic 2D value noise
+function noise2D(x: number, z: number, seed: number): number {
   const ix = Math.floor(x);
   const iz = Math.floor(z);
-  const sx = smooth(x - ix);
-  const sz = smooth(z - iz);
-  const sample = (sx0: number, sz0: number): number => {
-    let hash =
-      Math.imul(sx0 & (period - 1), 374761393) +
-      Math.imul(sz0 & (period - 1), 668265263) +
-      seed;
-    hash = Math.imul(hash ^ (hash >>> 13), 1274126177);
-    return ((hash ^ (hash >>> 16)) >>> 0) / 4294967295;
-  };
-  return mix(
-    mix(sample(ix, iz), sample(ix + 1, iz), sx),
-    mix(sample(ix, iz + 1), sample(ix + 1, iz + 1), sx),
-    sz
-  );
+  const sx = fade(x - ix);
+  const sz = fade(z - iz);
+  const a = hash2D(ix, iz, seed);
+  const b = hash2D(ix + 1, iz, seed);
+  const c = hash2D(ix, iz + 1, seed);
+  const d = hash2D(ix + 1, iz + 1, seed);
+  return mix(mix(a, b, sx), mix(c, d, sx), sz);
+}
+
+// Rotated-octave aperiodic fBm to eliminate grid-aligned artifacts and repetition
+function fbm2D(
+  x: number,
+  z: number,
+  octaves: number,
+  lacunarity: number,
+  gain: number,
+  seed: number
+): number {
+  let sum = 0;
+  let amp = 1;
+  let normFactor = 0;
+  let px = x;
+  let pz = z;
+  for (let i = 0; i < octaves; i++) {
+    sum += amp * noise2D(px, pz, seed + i * 131);
+    normFactor += amp;
+    const rx = (px * 0.8 + pz * 0.6) * lacunarity + 17.31;
+    const rz = (-px * 0.6 + pz * 0.8) * lacunarity + 29.17;
+    px = rx;
+    pz = rz;
+    amp *= gain;
+  }
+  return sum / normFactor;
+}
+
+function ridged2D(x: number, z: number, octaves: number, seed: number): number {
+  let sum = 0;
+  let amp = 1;
+  let normFactor = 0;
+  let px = x;
+  let pz = z;
+  for (let i = 0; i < octaves; i++) {
+    const n = 1 - Math.abs(2 * noise2D(px, pz, seed + i * 197) - 1);
+    sum += amp * n;
+    normFactor += amp;
+    const rx = (px * 0.8 - pz * 0.6) * 2.07 + 11.43;
+    const rz = (px * 0.6 + pz * 0.8) * 2.07 + 23.89;
+    px = rx;
+    pz = rz;
+    amp *= 0.5;
+  }
+  return sum / normFactor;
 }
 
 function mountain(x: number, z: number, map: number): number {
-  const u = x / TERRAIN_SIZE;
-  const v = z / TERRAIN_SIZE;
-  const sample = (f: number, salt: number, du = 0, dv = 0): number =>
-    noise((u + du) * f, (v + dv) * f, f, salt + map * 197);
-  const warpX = (sample(8, 47) - 0.5) * 0.14;
-  const warpZ = (sample(8, 91) - 0.5) * 0.14;
-  const ridge = 1 - Math.abs(2 * sample(16, 153, warpX, warpZ) - 1);
-  const roughness = sample(64, 290, warpX, warpZ) * 0.67 + sample(128, 342) * 0.33;
-  const broad = sample(8, 18);
-  const chains = clamp((broad - 0.2) * 1.6 + 0.16, 0, 1);
-  const peaks = Math.pow(ridge, 4.2) * (112 + 295 * sample(16, 119)) * chains;
+  const seed = 97 + map * 1009;
+  const warpX = (fbm2D(x * 0.00034, z * 0.00034, 3, 2.04, 0.5, seed + 47) - 0.5) * 640;
+  const warpZ = (fbm2D(x * 0.00034, z * 0.00034, 3, 2.04, 0.5, seed + 91) - 0.5) * 640;
+  const wx = x + warpX;
+  const wz = z + warpZ;
+
+  const ridge = ridged2D(wx * 0.00125, wz * 0.00125, 3, seed + 153);
+  const broad = fbm2D(x * 0.00042, z * 0.00042, 3, 2.02, 0.5, seed + 18);
+  const roughness = fbm2D(wx * 0.0031, wz * 0.0031, 3, 2.1, 0.5, seed + 290);
+  const chains = clamp((broad - 0.21) * 1.65 + 0.18, 0, 1);
+  const peaks =
+    Math.pow(ridge, 3.5) *
+    (118 + 280 * fbm2D(x * 0.00082, z * 0.00082, 2, 2.03, 0.5, seed + 119)) *
+    chains;
+
   if (map === 0) {
-    const river = 132 * Math.sin(v * 4 * Math.PI) + 66 * Math.sin(v * 10 * Math.PI);
-    const dx = Math.abs((((x - river + 2048) % 4096) + 4096) % 4096 - 2048);
-    const walls = smooth(clamp((dx - 51 - roughness * 30) / 112, 0, 1));
-    const ravine = smooth(clamp((Math.abs(sample(16, 34, warpX) - 0.5) - 0.025) * 7, 0, 1));
+    // Aperiodic meandering river gorge with varied width + branching canyons + plateaus
+    const riverX = (fbm2D(z * 0.00031, x * 0.00011, 3, 2.03, 0.5, 401) - 0.5) * 1320;
+    const canyonHalfW = 48 + fbm2D(x * 0.00062, z * 0.00062, 2, 2.05, 0.5, 503) * 112;
+    const walls = smooth(clamp((Math.abs(x - riverX) - canyonHalfW - roughness * 24) / 118, 0, 1));
+
+    const branchField = Math.abs(fbm2D(wx * 0.00047, wz * 0.00047, 3, 2.04, 0.5, 607) - 0.5) * 2;
+    const branchWidth = 0.03 + fbm2D(x * 0.0009, z * 0.0009, 2, 2.0, 0.5, 709) * 0.08;
+    const ravine = smooth(clamp((branchField - branchWidth) * 6.5, 0, 1));
+
+    const rawElev = 44 + broad * 82 + peaks + roughness * 54;
+    const plateauStep = 52;
+    const plateauElev = Math.floor(rawElev / plateauStep) * plateauStep + 18;
+    const plateauMask =
+      smooth(clamp((fbm2D(x * 0.00054, z * 0.00054, 2, 2.0, 0.5, 811) - 0.36) * 3.4, 0, 1)) * 0.52;
+    const sculpted = mix(rawElev, plateauElev, plateauMask);
+
+    const ground = 8 + walls * sculpted * mix(0.24, 1, ravine);
     const distance = Math.hypot(x - VOLCANO.x, z - VOLCANO.z);
-    const ground = 8 + walls * (42 + broad * 72 + peaks + roughness * 56) * mix(0.25, 1, ravine);
     const crossAxis = Math.min(Math.abs(x - VOLCANO.x), Math.abs(z - VOLCANO.z));
     const approach =
-      (1 - smooth(clamp((crossAxis - 42) / 71, 0, 1))) *
-      (1 - smooth(clamp((distance - 452) / 104, 0, 1)));
-    const surroundings = smooth(clamp((distance - 280) / 155, 0, 1));
-    return mix(32, ground, surroundings * (1 - approach));
+      (1 - smooth(clamp((crossAxis - 44) / 72, 0, 1))) *
+      (1 - smooth(clamp((distance - 470) / 110, 0, 1)));
+    const surroundings = smooth(clamp((distance - 280) / 160, 0, 1));
+    return mix(30, ground, surroundings * (1 - approach));
   }
-  const coast = clamp((broad + 0.2 * (sample(32, 76, warpX, warpZ) - 0.5) - 0.39) * 5.7, 0, 1);
-  const baseIce = coast * (23 + peaks * 1.22 + ridge * 43 + roughness * 89);
-  // Clear smooth approaches around Glacier Vault on Frostline Reach
+
+  // Frostline Reach: elevation-driven arctic ocean channels, glacier shelves, plateaus, and alpine peaks
+  const coast = clamp(
+    (broad + 0.24 * (fbm2D(wx * 0.00092, wz * 0.00092, 2, 2.02, 0.5, seed + 76) - 0.5) - 0.37) * 5.3,
+    0,
+    1
+  );
+  const shelfRaw = 24 + peaks * 1.18 + ridge * 46 + roughness * 84;
+  const icePlateau = Math.floor(shelfRaw / 58) * 58 + 24;
+  const shelfMask =
+    smooth(clamp((fbm2D(x * 0.00058, z * 0.00058, 2, 2.0, 0.5, seed + 412) - 0.4) * 3.2, 0, 1)) * 0.42;
+  const baseIce = coast * mix(shelfRaw, icePlateau, shelfMask);
+
+  // Clear smooth approaches around Glacier Vault dormant volcano at [0, 0]
   const gDist = Math.hypot(x - GLACIER_VAULT.x, z - GLACIER_VAULT.z);
   const gCross = Math.min(Math.abs(x - GLACIER_VAULT.x), Math.abs(z - GLACIER_VAULT.z));
   const gApproach =
-    (1 - smooth(clamp((gCross - 44) / 70, 0, 1))) *
-    (1 - smooth(clamp((gDist - 430) / 100, 0, 1)));
-  const gSurround = smooth(clamp((gDist - 260) / 145, 0, 1));
+    (1 - smooth(clamp((gCross - 46) / 72, 0, 1))) *
+    (1 - smooth(clamp((gDist - 450) / 105, 0, 1)));
+  const gSurround = smooth(clamp((gDist - 265) / 150, 0, 1));
   return mix(24, baseIce, gSurround * (1 - gApproach));
+}
+
+function getTerrainChunk(map: number, cx: number, cz: number): Uint8Array {
+  const cache = chunkCaches[map] ?? chunkCaches[0];
+  const key = `${cx},${cz}`;
+  const cached = cache.get(key);
+  if (cached) {
+    cache.delete(key);
+    cache.set(key, cached);
+    return cached;
+  }
+  const chunk = new Uint8Array(CHUNK_CELLS * CHUNK_CELLS);
+  const baseX = cx * CHUNK_SIZE;
+  const baseZ = cz * CHUNK_SIZE;
+  for (let lz = 0; lz < CHUNK_CELLS; lz++) {
+    const wz = baseZ + lz * TERRAIN_GRID;
+    const rowOff = lz * CHUNK_CELLS;
+    for (let lx = 0; lx < CHUNK_CELLS; lx++) {
+      const wx = baseX + lx * TERRAIN_GRID;
+      chunk[rowOff + lx] = Math.round(
+        (clamp(mountain(wx, wz, map), 0, TERRAIN_HEIGHT) * 255) / TERRAIN_HEIGHT
+      );
+    }
+  }
+  cache.set(key, chunk);
+  if (cache.size > MAX_CACHED_CHUNKS) {
+    const oldest = cache.keys().next().value;
+    if (oldest !== undefined) cache.delete(oldest);
+  }
+  return chunk;
+}
+
+export function sampleElevationWindow(
+  map: number,
+  originX: number,
+  originZ: number,
+  texels = ELEVATION_TEXELS,
+  step = ELEVATION_STEP,
+  out?: Uint8Array
+): Uint8Array {
+  const buf = out && out.length === texels * texels ? out : new Uint8Array(texels * texels);
+  if (step === TERRAIN_GRID && originX % CHUNK_SIZE === 0 && originZ % CHUNK_SIZE === 0 && texels % CHUNK_CELLS === 0) {
+    const chunksPerSide = texels / CHUNK_CELLS;
+    const startCx = originX / CHUNK_SIZE;
+    const startCz = originZ / CHUNK_SIZE;
+    for (let czOff = 0; czOff < chunksPerSide; czOff++) {
+      const baseRow = czOff * CHUNK_CELLS;
+      for (let cxOff = 0; cxOff < chunksPerSide; cxOff++) {
+        const chunk = getTerrainChunk(map, startCx + cxOff, startCz + czOff);
+        const baseCol = cxOff * CHUNK_CELLS;
+        for (let lz = 0; lz < CHUNK_CELLS; lz++) {
+          buf.set(
+            chunk.subarray(lz * CHUNK_CELLS, (lz + 1) * CHUNK_CELLS),
+            (baseRow + lz) * texels + baseCol
+          );
+        }
+      }
+    }
+    return buf;
+  }
+  for (let row = 0; row < texels; row++) {
+    const wz = originZ + row * step;
+    const rowOff = row * texels;
+    for (let col = 0; col < texels; col++) {
+      const wx = originX + col * step;
+      buf[rowOff + col] = Math.round(
+        (clamp(mountain(wx, wz, map), 0, TERRAIN_HEIGHT) * 255) / TERRAIN_HEIGHT
+      );
+    }
+  }
+  return buf;
 }
 
 export function terrainTile(map: number): Uint8Array {
   const existing = tiles[map];
   if (existing) return existing;
-  const tile = new Uint8Array(TERRAIN_TEXELS ** 2);
-  const cell = TERRAIN_SIZE / TERRAIN_TEXELS;
-  for (let row = 0; row < TERRAIN_TEXELS; row++) {
-    let z = (row + 0.5) * cell;
-    if (z >= TERRAIN_SIZE / 2) z -= TERRAIN_SIZE;
-    for (let col = 0; col < TERRAIN_TEXELS; col++) {
-      let x = (col + 0.5) * cell;
-      if (x >= TERRAIN_SIZE / 2) x -= TERRAIN_SIZE;
-      tile[row * TERRAIN_TEXELS + col] = Math.round(
-        (clamp(mountain(x, z, map), 0, TERRAIN_HEIGHT) * 255) / TERRAIN_HEIGHT
-      );
-    }
-  }
+  const tile = sampleElevationWindow(
+    map,
+    -TERRAIN_SIZE / 2,
+    -TERRAIN_SIZE / 2,
+    TERRAIN_TEXELS,
+    TERRAIN_SIZE / TERRAIN_TEXELS
+  );
   tiles[map] = tile;
   return tile;
 }
 
-function baseHeight(x: number, z: number, map: number): number {
-  const tile = terrainTile(map);
-  const px = (x * TERRAIN_TEXELS) / TERRAIN_SIZE - 0.5;
-  const pz = (z * TERRAIN_TEXELS) / TERRAIN_SIZE - 0.5;
-  const left = Math.floor(px);
-  const top = Math.floor(pz);
-  const sx = px - left;
-  const sz = pz - top;
-  const a = (top & mask) * TERRAIN_TEXELS;
-  const b = ((top + 1) & mask) * TERRAIN_TEXELS;
-  const l = left & mask;
-  const r = (left + 1) & mask;
-  return (
-    (mix(mix(tile[a + l], tile[a + r], sx), mix(tile[b + l], tile[b + r], sx), sz) *
-      TERRAIN_HEIGHT) /
-    255
-  );
-}
-
 function gridHeight(x: number, z: number, map: number): number {
-  return Math.max(10, Math.floor(baseHeight(x, z, map) / 4) * 4);
+  const gx = Math.round(x / TERRAIN_GRID);
+  const gz = Math.round(z / TERRAIN_GRID);
+  const cx = Math.floor(gx / CHUNK_CELLS);
+  const cz = Math.floor(gz / CHUNK_CELLS);
+  const lx = gx - cx * CHUNK_CELLS;
+  const lz = gz - cz * CHUNK_CELLS;
+  const chunk = getTerrainChunk(map, cx, cz);
+  const h = (chunk[lz * CHUNK_CELLS + lx] * TERRAIN_HEIGHT) / 255;
+  return Math.max(10, Math.floor(h / 4) * 4);
 }
 
 export function terrainHeight(x: number, z: number, map: number): number {

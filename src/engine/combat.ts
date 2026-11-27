@@ -424,8 +424,8 @@ export function stepAircraftAI(
   let liveTarget: AircraftEntity | FlightState | null = null;
 
   if (ac.isEscortTarget) {
-    // Escort transport flies steadily toward destination waypoint
-    const goal: Vec3 = [ac.index * 90 - 45, 220, 1450];
+    // Escort transport flies steadily along the eastern glacial channel toward destination
+    const goal: Vec3 = [520 + ac.index * 90 - 45, 280, 1450];
     targetPos = goal;
   } else if (ac.friendly) {
     // Friendly wingman attacks nearest enemy or forms up with player

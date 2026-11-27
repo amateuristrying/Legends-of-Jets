@@ -6,16 +6,17 @@ import {
   clamp,
   cross,
   dot,
+  ELEVATION_SPAN,
+  ELEVATION_STEP,
+  ELEVATION_TEXELS,
   GLACIER_VAULT,
   norm,
   planes,
+  sampleElevationWindow,
   scale,
   sub,
   TERRAIN_GRID,
   TERRAIN_HEIGHT,
-  TERRAIN_SIZE,
-  TERRAIN_TEXELS,
-  terrainTile,
   TRAIL_MAX_AGE,
   VOLCANO,
   WING_Y_OFFSET,
@@ -80,6 +81,16 @@ float broadNoise(vec2 p) {
   f = f * f * (3. - 2. * f);
   return mix(mix(hash(cell), hash(cell + vec2(1.,0.)), f.x),
              mix(hash(cell + vec2(0.,1.)), hash(cell + vec2(1.,1.)), f.x), f.y);
+}
+float fbm(vec2 p) {
+  float sum = 0., amp = .5;
+  mat2 rot = mat2(.8, .6, -.6, .8);
+  for (int i = 0; i < 3; i++) {
+    sum += amp * broadNoise(p);
+    p = rot * p * 2.03 + vec2(17.1, 31.7);
+    amp *= .5;
+  }
+  return sum;
 }
 vec3 skyColor(vec3 ray) {
   float h = clamp(ray.y * 1.55, 0., 1.);
@@ -151,10 +162,12 @@ in vec3 a, n;
 in vec2 tileOrigin;
 out vec3 world, direction, normal;
 uniform vec3 eye, right, up, front;
-uniform float aspect, fov, landmark;
+uniform vec2 elevationOrigin;
+uniform float aspect, fov, landmark, elevationSpan, elevationTexel;
 uniform sampler2D elevation;
 float groundAt(vec2 p) {
-  float h = textureLod(elevation, p / ${TERRAIN_SIZE}.0, 0.).r * ${TERRAIN_HEIGHT}.0;
+  vec2 uv = clamp((p - elevationOrigin + 0.5 * elevationTexel) / elevationSpan, 0.0, 1.0);
+  float h = textureLod(elevation, uv, 0.).r * ${TERRAIN_HEIGHT}.0;
   return max(10., floor(h * .25 + .0001) * 4.);
 }
 void main() {
@@ -177,7 +190,8 @@ precision highp float;
 in vec3 world, direction, normal;
 out vec4 color;
 uniform vec3 jet;
-uniform float landmark;
+uniform vec2 elevationOrigin;
+uniform float landmark, elevationSpan, elevationTexel;
 uniform int map;
 uniform sampler2D elevation;
 ${atmosphereGLSL}
@@ -203,59 +217,76 @@ void main() {
   float detail = 1.-smoothstep(300.,2100.,distance);
   vec3 c, emission = vec3(0.);
   if (landmark > .5 && map == 0) {
-    // Ashmouth Caldera
+    // Active Volcano: Ashmouth Caldera at [0, 0] with glowing magma veins & molten lava floor
     vec2 q = p.xz - vec2(${VOLCANO.x}.0,${VOLCANO.z}.0);
-    float veins = pow(max(0.,sin(q.x*.13 + sin(q.y*.082)*2. + p.y*.20)
-      * sin(q.y*.109 - p.y*.27)), 5.);
-    c = mix(vec3(.20,.17,.19), vec3(.37,.32,.34), smoothstep(0.,330.,p.y));
-    c += (broadNoise(p.xz*.046 + p.y*.034)-.5) * .10 * detail;
-    float inside = smoothstep(.04,.45, -surfaceNormal.y) + 1.-smoothstep(100.,155.,length(q));
-    emission = vec3(.94,.21,.035) * veins * (.34 + min(1.,inside)*.26) * detail;
-    if (p.y < 61. && length(q) < 138.) {
-      emission += vec3(.87,.19,.029) * (.74 + broadNoise(q*.05 + clock*.025)*.29);
+    float warp = fbm(q * .018 + vec2(p.y * .009, -p.y * .007)) * 2.4;
+    float crackA = 1. - abs(2. * fbm(q * .042 + vec2(warp, p.y * .034)) - 1.);
+    float crackB = 1. - abs(2. * fbm(q * .071 - vec2(p.y * .028, warp)) - 1.);
+    float veins = pow(clamp(crackA * crackB * 1.45, 0., 1.), 3.4);
+    c = mix(vec3(.16,.13,.15), vec3(.35,.28,.27), smoothstep(20.,350.,p.y));
+    c += (fbm(p.xz * .036 + p.y * .024) - .5) * .11 * detail;
+    float inside = smoothstep(.04,.45, -surfaceNormal.y) + 1.-smoothstep(95.,158.,length(q));
+    float pulse = .84 + .16 * sin(clock * 2.1 + p.y * .04 + warp);
+    emission = mix(vec3(.96,.20,.03), vec3(1.,.55,.08), veins) * veins * (.36 + min(1.,inside)*.36) * pulse * detail;
+    if (p.y < 63. && length(q) < 142.) {
+      float crust = fbm(q * .038 + vec2(clock * .035, -clock * .025));
+      float molten = smoothstep(.24, .68, crust);
+      c = mix(vec3(.14,.09,.09), c, smoothstep(55., 63., p.y));
+      emission += mix(vec3(.88,.16,.02), vec3(1.0,.62,.10), molten) * (.68 + molten * .45);
     }
     vec2 axis = abs(q);
-    if (min(axis.x,axis.y)>33. && min(axis.x,axis.y)<51. && abs(p.y-136.)<12.) {
+    if (min(axis.x,axis.y)>33. && min(axis.x,axis.y)<51. && abs(p.y-${VOLCANO.tunnelAltitude}.0)<12.) {
       float strip = 1.-smoothstep(2.,6.,abs(mod(max(axis.x,axis.y), 35.)-17.5));
       emission += vec3(1.,.43,.13) * strip * .62 * detail;
     }
   } else if (landmark > .5 && map == 1) {
-    // Frostline Glacier Vault (3D crystalline ice cavern)
+    // Dormant Volcano: Snow-capped basalt/obsidian Glacier Vault at [0, 0] with interior ice shelves (no lava)
     vec2 q = p.xz - vec2(${GLACIER_VAULT.x}.0,${GLACIER_VAULT.z}.0);
-    float veins = pow(max(0., sin(q.x*.11 + p.y*.18) * cos(q.y*.11 - p.y*.21)), 4.);
-    c = mix(vec3(.28,.54,.72), vec3(.82,.94,.98), smoothstep(20.,310.,p.y));
-    c += (broadNoise(p.xz*.05 + p.y*.03)-.5) * .09 * detail;
-    float inside = smoothstep(.04,.45, -surfaceNormal.y) + 1.-smoothstep(95.,145.,length(q));
-    emission = vec3(.14,.78,.95) * veins * (.26 + min(1.,inside)*.34) * detail;
+    float rockNoise = fbm(p.xz * .032 + p.y * .018);
+    float iceFacet = fbm(q * .048 - vec2(p.y * .022, -p.y * .019));
+    vec3 obsidian = mix(vec3(.11,.13,.16), vec3(.24,.27,.32), rockNoise);
+    float inside = clamp(smoothstep(.04,.45, -surfaceNormal.y) + (1.-smoothstep(95.,148.,length(q))), 0., 1.);
+    float snowCap = smoothstep(135., 295., p.y + (rockNoise - .5) * 44.) * clamp(surfaceNormal.y * 1.15, 0., 1.);
+    float floorFrost = smoothstep(78., 44., p.y) * (1. - smoothstep(80., 138., length(q)));
+    float iceShelf = clamp(inside * (.45 + iceFacet * .45) + floorFrost * .85, 0., 1.);
+    c = mix(obsidian, vec3(.84,.92,.96), snowCap * .88);
+    c = mix(c, mix(vec3(.36,.68,.84), vec3(.78,.93,.98), iceFacet), iceShelf * .82);
+    c += (iceFacet - .5) * .08 * detail;
+    float glint = pow(clamp(1. - abs(2. * iceFacet - 1.), 0., 1.), 4.) * iceShelf;
+    emission = vec3(.16,.58,.78) * glint * .28 * detail;
     vec2 axis = abs(q);
-    if (min(axis.x,axis.y)>34. && min(axis.x,axis.y)<54. && abs(p.y-124.)<14.) {
+    if (min(axis.x,axis.y)>34. && min(axis.x,axis.y)<54. && abs(p.y-${GLACIER_VAULT.tunnelAltitude}.0)<14.) {
       float strip = 1.-smoothstep(2.,6.,abs(mod(max(axis.x,axis.y), 32.)-16.));
-      emission += vec3(.32,.96,1.) * strip * .72 * detail;
+      emission += vec3(.32,.96,1.) * strip * .68 * detail;
     }
   } else if (p.y <= 10.015) {
-    float shelves = texture(elevation, p.xz / ${TERRAIN_SIZE}.0).r * ${TERRAIN_HEIGHT}.0;
+    vec2 uv = clamp((p.xz - elevationOrigin + 0.5 * elevationTexel) / elevationSpan, 0.0, 1.0);
+    float shelves = texture(elevation, uv).r * ${TERRAIN_HEIGHT}.0;
     c = map == 0 ? vec3(.10,.34,.35) : vec3(.063,.26,.46);
     c = mix(c, map == 0 ? vec3(.22,.48,.42) : vec3(.16,.52,.63), smoothstep(4.,13.,shelves)*.67);
-    float swell = sin(p.x*.085 + p.z*.13 + clock * 1.1 + broadNoise(p.xz*.044)*3.);
-    c += (smoothstep(.68,.99,swell)-.2) * .034 * detail;
+    float swell = fbm(p.xz * .034 + vec2(clock * .08, -clock * .05)) * 2. - 1. + sin(p.x * .07 + p.z * .11 + clock * 1.1) * .35;
+    c += smoothstep(.22, .78, swell) * .036 * detail;
     surfaceNormal = vec3(0.,1.,0.);
   } else {
-    float bands = sin(p.y*.14 + broadNoise(p.xz*.018)*2.2);
-    float stone = broadNoise(p.xz*.033);
-    float grain = broadNoise(p.xz*.083 + p.y*.016) - .5;
-    float grainContrast = .068 * (1.-smoothstep(2.5,11.,footprint));
+    float macroWarp = fbm(p.xz * .0048);
+    float strata = fbm(vec2(p.y * .042 + macroWarp * 3.1, (p.x * .61 - p.z * .79) * .0035));
+    float stone = fbm(p.xz * .026 + macroWarp * 1.4);
+    float grain = fbm(p.xz * .079 + vec2(p.y * .014, -p.y * .011)) - .5;
+    float grainContrast = .072 * (1.-smoothstep(2.5,12.,footprint));
     if (map == 0) {
-      c = mix(vec3(.46,.22,.14),vec3(.78,.49,.31),smoothstep(20.,235.,p.y));
-      c = mix(c,vec3(.38,.18,.16),slope*.63);
-      c = mix(c,vec3(.84,.68,.47),smoothstep(250.,412.,p.y)*.62);
-      c += (smoothstep(-.24,.47,bands) - .5) * .086 * (1.-smoothstep(8.,28.,footprint));
+      vec3 canyonFloor = mix(vec3(.24,.28,.19), vec3(.47,.23,.14), smoothstep(11., 46., p.y));
+      c = mix(canyonFloor, vec3(.78,.49,.31), smoothstep(46., 235., p.y));
+      c = mix(c, vec3(.36,.17,.15), slope * .64);
+      c = mix(c, vec3(.84,.67,.47), smoothstep(245., 395., p.y) * (1. - slope * .35) * .68);
+      c = mix(c, vec3(.32,.26,.25), smoothstep(415., 545., p.y) * .55);
+      c += (smoothstep(.26, .74, strata) - .5) * .095 * (1.-smoothstep(8.,28.,footprint));
     } else {
-      float snow = smoothstep(84.,247.,p.y + (stone-.5)*43.) * (1.-slope*.59);
-      c = mix(vec3(.23,.46,.63),vec3(.84,.91,.93),snow);
-      c = mix(c,vec3(.19,.34,.48),slope*.26);
-      c += bands*.018*detail;
+      float snow = smoothstep(80., 245., p.y + (stone - .5) * 48.) * (1. - slope * .62);
+      c = mix(vec3(.21,.44,.61), vec3(.85,.92,.95), snow);
+      c = mix(c, vec3(.16,.24,.34), slope * .42);
+      c += (strata - .5) * .034 * detail;
     }
-    c += (stone-.5) * .090 * detail + grain * grainContrast;
+    c += (stone-.5) * .092 * detail + grain * grainContrast;
   }
   vec3 sunDir = atmo == 1 ? normalize(vec3(-.75,.32,.63)) : normalize(vec3(-.59,.71,.38));
   float light = max(0.,dot(surfaceNormal,sunDir));
@@ -608,7 +639,10 @@ export class Renderer {
   structures: Map<string, BufferHandle>;
   effects: Map<string, BufferHandle>;
   locations: Map<WebGLProgram, Map<string, WebGLUniformLocation | null>>;
-  elevations: Map<number, WebGLTexture>;
+  elevations: Map<
+    number,
+    { texture: WebGLTexture; originX: number; originZ: number; buffer: Uint8Array }
+  >;
   trailBuffer: WebGLBuffer;
   trailData: Float32Array;
   caldera?: SurfaceHandle;
@@ -720,7 +754,7 @@ export class Renderer {
     return { buffer, count: data.length / 6 };
   }
 
-  uniform(prog: WebGLProgram, name: string, value: number | Vec3): void {
+  uniform(prog: WebGLProgram, name: string, value: number | Vec3 | [number, number]): void {
     const gl = this.gl;
     let map = this.locations.get(prog);
     if (!map) {
@@ -730,8 +764,10 @@ export class Renderer {
     if (!map.has(name)) map.set(name, gl.getUniformLocation(prog, name));
     const location = map.get(name);
     if (!location) return;
-    if (Array.isArray(value)) gl.uniform3fv(location, value);
-    else if (name === 'map' || name === 'atmo') gl.uniform1i(location, value);
+    if (Array.isArray(value)) {
+      if (value.length === 2) gl.uniform2fv(location, value);
+      else gl.uniform3fv(location, value);
+    } else if (name === 'map' || name === 'atmo') gl.uniform1i(location, value);
     else gl.uniform1f(location, value);
   }
 
@@ -756,29 +792,58 @@ export class Renderer {
     for (const [name, value] of Object.entries(values)) this.uniform(prog, name, value);
   }
 
-  elevationTexture(map: number): WebGLTexture {
-    const existing = this.elevations.get(map);
-    if (existing) return existing;
+  elevationTexture(
+    map: number,
+    eyeX = 0,
+    eyeZ = 0
+  ): { texture: WebGLTexture; originX: number; originZ: number } {
     const gl = this.gl;
-    const texture = gl.createTexture()!;
-    gl.bindTexture(gl.TEXTURE_2D, texture);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
-    gl.texImage2D(
-      gl.TEXTURE_2D,
-      0,
-      gl.R8,
-      TERRAIN_TEXELS,
-      TERRAIN_TEXELS,
-      0,
-      gl.RED,
-      gl.UNSIGNED_BYTE,
-      terrainTile(map)
-    );
-    this.elevations.set(map, texture);
-    return texture;
+    const snapX = Math.round(eyeX / 128) * 128;
+    const snapZ = Math.round(eyeZ / 128) * 128;
+    const originX = snapX - ELEVATION_SPAN / 2;
+    const originZ = snapZ - ELEVATION_SPAN / 2;
+    const existing = this.elevations.get(map);
+    if (!existing) {
+      const texture = gl.createTexture()!;
+      const buffer = sampleElevationWindow(map, originX, originZ, ELEVATION_TEXELS, ELEVATION_STEP);
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texImage2D(
+        gl.TEXTURE_2D,
+        0,
+        gl.R8,
+        ELEVATION_TEXELS,
+        ELEVATION_TEXELS,
+        0,
+        gl.RED,
+        gl.UNSIGNED_BYTE,
+        buffer
+      );
+      const entry = { texture, originX, originZ, buffer };
+      this.elevations.set(map, entry);
+      return entry;
+    }
+    if (existing.originX !== originX || existing.originZ !== originZ) {
+      sampleElevationWindow(map, originX, originZ, ELEVATION_TEXELS, ELEVATION_STEP, existing.buffer);
+      existing.originX = originX;
+      existing.originZ = originZ;
+      gl.bindTexture(gl.TEXTURE_2D, existing.texture);
+      gl.texSubImage2D(
+        gl.TEXTURE_2D,
+        0,
+        0,
+        0,
+        ELEVATION_TEXELS,
+        ELEVATION_TEXELS,
+        gl.RED,
+        gl.UNSIGNED_BYTE,
+        existing.buffer
+      );
+    }
+    return existing;
   }
 
   surfaceBuffer(
@@ -827,7 +892,11 @@ export class Renderer {
     const gl = this.gl;
     this.setup(this.terrain, camera, state, time);
     gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, this.elevationTexture(state.map));
+    const elev = this.elevationTexture(state.map, camera.eye[0], camera.eye[2]);
+    gl.bindTexture(gl.TEXTURE_2D, elev.texture);
+    this.uniform(this.terrain, 'elevationOrigin', [elev.originX, elev.originZ]);
+    this.uniform(this.terrain, 'elevationSpan', ELEVATION_SPAN);
+    this.uniform(this.terrain, 'elevationTexel', ELEVATION_STEP);
     const player = objects.find((obj) => !obj.kind);
     this.uniform(this.terrain, 'jet', player?.pos ?? [1e8, 0, 1e8]);
 

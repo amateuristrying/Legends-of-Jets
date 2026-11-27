@@ -321,7 +321,7 @@ export const App: React.FC = () => {
       } else if (opts?.glacier || opts?.timeTrialCourse === 'glacier') {
         position = [GLACIER_VAULT.x, GLACIER_VAULT.tunnelAltitude, GLACIER_VAULT.z - 420];
       } else {
-        position = map === 0 ? [0, 250, -52] : [-205, 280, -45];
+        position = map === 0 ? [0, 260, -680] : [-420, 280, -640];
       }
 
       const ownCrew =
