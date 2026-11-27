@@ -20,9 +20,12 @@ import {
   maps,
   mix,
   planes,
+  pruneTrail,
+  recordTrailSample,
   scale,
   solidAt,
   VOLCANO,
+  wingtipPositions,
 } from './engine/world';
 import { cameraAt, Renderer, type CameraState, type RenderObject, type TrailSample } from './engine/renderer';
 import { interpolateFlight, newFlight, SIM_STEP, stepFlight, views } from './engine/flight';
@@ -196,7 +199,7 @@ export const App: React.FC = () => {
   const prevFlightRef = useRef<FlightState>(newFlight(0));
   const missionRef = useRef<MissionState | null>(null);
   const trailRef = useRef<TrailSample[]>([]);
-  const lastTrailRef = useRef(0);
+  const lastTrailRef = useRef(-1);
   const simTimeRef = useRef(0);
   const keysRef = useRef<Set<string>>(new Set());
   const pressedRef = useRef<Set<string>>(new Set());
@@ -342,7 +345,8 @@ export const App: React.FC = () => {
       crewSyncedRef.current = null;
       simTimeRef.current = 0;
       trailRef.current = [];
-      lastTrailRef.current = 0;
+      lastTrailRef.current = -1;
+      radarRef.current?.reset();
       lastCameraRef.current = null;
       transitionRef.current = null;
       displayedCockpitRef.current = 0;
@@ -360,10 +364,27 @@ export const App: React.FC = () => {
   );
 
   const returnToHangar = useCallback((keepLobby = false) => {
+    trailRef.current = [];
+    lastTrailRef.current = -1;
     setScene('hangar');
     if (!keepLobby) crewRef.current?.disconnect();
     setModal(null);
   }, []);
+
+  // Instantiate Radar when flight HUD mounts #radar and dispose cleanly on hangar return
+  useEffect(() => {
+    if (scene !== 'flight' || !radarCanvasRef.current) {
+      radarRef.current?.dispose();
+      radarRef.current = null;
+      return;
+    }
+    const radar = new Radar(radarCanvasRef.current);
+    radarRef.current = radar;
+    return () => {
+      radar.dispose();
+      if (radarRef.current === radar) radarRef.current = null;
+    };
+  }, [scene]);
 
   const cycleView = useCallback(() => {
     if (sceneStateRef.current !== 'flight' || modalRef.current) return;
@@ -505,10 +526,6 @@ export const App: React.FC = () => {
       return;
     }
 
-    if (radarCanvasRef.current && !radarRef.current) {
-      radarRef.current = new Radar(radarCanvasRef.current);
-    }
-
     let rafId = 0;
     let lastTime: number | undefined;
     let accumulator = 0;
@@ -587,18 +604,21 @@ export const App: React.FC = () => {
     };
 
     const rememberPlayerTrail = (f: FlightState, t: number) => {
-      if (t - lastTrailRef.current < 0.045 || f.death > 0) return;
-      lastTrailRef.current = t;
-      const wing: Vec3 = [Math.cos(f.yaw), 0, -Math.sin(f.yaw)];
-      const width = [7, 9, 12, 11, 12][f.type] ?? 8;
-      const back = add(f.pos, scale(forward(f.yaw), -4));
-      const delta = add(scale(wing, width * Math.cos(f.roll)), [0, width * Math.sin(f.roll), 0]);
-      trailRef.current.push({
-        time: t,
-        left: add(back, delta),
-        right: add(back, scale(delta, -1)),
-      });
-      if (trailRef.current.length > 36) trailRef.current.shift();
+      if (f.death > 0) {
+        pruneTrail(trailRef.current, t);
+        return;
+      }
+      lastTrailRef.current = recordTrailSample(
+        trailRef.current,
+        lastTrailRef.current,
+        f.pos,
+        f.type,
+        f.yaw,
+        f.pitch,
+        f.roll,
+        t,
+        0.045
+      );
     };
 
     const frame = (timestamp: number) => {
@@ -645,10 +665,14 @@ export const App: React.FC = () => {
                   srv.pos[1] - f.pos[1],
                   srv.pos[2] - f.pos[2]
                 );
-                if (f.lives !== srv.lives || (f.death > 0) !== (srv.death > 0) || d > 42) {
+                const respawned = f.lives !== srv.lives || (f.death > 0 && srv.death <= 0) || d > 42;
+                if (respawned || (f.death > 0) !== (srv.death > 0)) {
                   Object.assign(f, srv);
                   prevFlightRef.current = { ...f, pos: [...f.pos] as Vec3 };
-                  trailRef.current = [];
+                  if (respawned) {
+                    trailRef.current = [];
+                    lastTrailRef.current = -1;
+                  }
                 } else {
                   const proj =
                     srv.death > 0
@@ -817,6 +841,7 @@ export const App: React.FC = () => {
               if (f.recovered) {
                 prevFlightRef.current = { ...f, pos: [...f.pos] as Vec3 };
                 trailRef.current = [];
+                lastTrailRef.current = -1;
                 lastCameraRef.current = null;
                 transitionRef.current = null;
               }
@@ -920,10 +945,24 @@ export const App: React.FC = () => {
           }
         }
 
-        // Universal contrails for player + all AI aircraft
-        allTrails = [trailRef.current];
+        // Universal contrails for player + all AI aircraft (anchored to live 3D wingtips)
+        if (pose.death <= 0 && trailRef.current.length >= 1) {
+          const liveTips = wingtipPositions(pose.pos, pose.type, pose.yaw, pose.pitch, pose.roll);
+          allTrails.push([
+            ...trailRef.current,
+            { time: simTimeRef.current, left: liveTips.left, right: liveTips.right },
+          ]);
+        } else if (trailRef.current.length >= 2) {
+          allTrails.push(trailRef.current);
+        }
         for (const ac of [...m.allies, ...m.enemies]) {
-          if (ac.trail.length >= 2) allTrails.push(ac.trail);
+          if (ac.trail.length >= 1) {
+            const acTips = wingtipPositions(ac.pos, ac.type, ac.yaw, ac.pitch, ac.roll);
+            allTrails.push([
+              ...ac.trail,
+              { time: simTimeRef.current, left: acTips.left, right: acTips.right },
+            ]);
+          }
         }
 
         // Clearance calculation
@@ -1069,7 +1108,11 @@ export const App: React.FC = () => {
           ctx.fillStyle = `rgba(225, 45, 35, ${missionRef.current.damageFlash * 0.36})`;
           ctx.fillRect(0, 0, overlay.width, overlay.height);
         }
-        if (mapVisibleRef.current && radarRef.current && timestamp - radarTimer > 65) {
+        if (
+          mapVisibleRef.current &&
+          radarRef.current &&
+          (!radarRef.current.lastTerrain || timestamp - radarTimer > 65)
+        ) {
           radarRef.current.draw(pose, missionRef.current, curMap);
           radarTimer = timestamp;
         }

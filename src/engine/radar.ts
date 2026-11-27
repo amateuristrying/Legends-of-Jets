@@ -40,9 +40,7 @@ export class Radar {
   }
 
   tile(flight: FlightState, map: number, range: number): void {
-    const ctx = this.surface.getContext('2d')!;
     const n = this.surface.width;
-    const texture = ctx.createImageData(n, n);
     const stride = (range * 182) / 78 / n;
     const x = Math.round(flight.pos[0] / stride) * stride;
     const z = Math.round(flight.pos[2] / stride) * stride;
@@ -50,28 +48,45 @@ export class Radar {
     if (key === this.lastTerrain) return;
     this.lastTerrain = key;
     this.tileCenter = [x, z];
+    const ctx = this.surface.getContext('2d')!;
+    const texture = ctx.createImageData(n, n);
+    const data = texture.data;
     const ice = map === 1;
     for (let row = 0; row < n; row++) {
+      const worldZ = z + (n / 2 - row - 0.5) * stride;
       for (let col = 0; col < n; col++) {
-        const worldX = x + (col - n / 2) * stride;
-        const worldZ = z + (n / 2 - row) * stride;
+        const worldX = x + (col + 0.5 - n / 2) * stride;
         const m = height(worldX, worldZ, map);
         const level = Math.floor(m / 42) * 4;
         const dilate =
           map === 0
             ? Math.hypot(worldX - VOLCANO.x, worldZ - VOLCANO.z) < 365
             : Math.hypot(worldX - GLACIER_VAULT.x, worldZ - GLACIER_VAULT.z) < 335;
-        const color =
-          m <= 10
-            ? [12, 37, 51]
-            : dilate
-              ? ice
-                ? [34 + level, 78 + level, 96 + level]
-                : [70 + level, 37 + level, 29 + level]
-              : ice
-                ? [25 + level, 51 + level, 64 + level]
-                : [38 + level, 48 + level, 42 + level];
-        texture.data.set([...color, 255], (row * n + col) * 4);
+        const idx = (row * n + col) * 4;
+        if (m <= 10) {
+          data[idx] = 12;
+          data[idx + 1] = 37;
+          data[idx + 2] = 51;
+        } else if (dilate) {
+          if (ice) {
+            data[idx] = 34 + level;
+            data[idx + 1] = 78 + level;
+            data[idx + 2] = 96 + level;
+          } else {
+            data[idx] = 70 + level;
+            data[idx + 1] = 37 + level;
+            data[idx + 2] = 29 + level;
+          }
+        } else if (ice) {
+          data[idx] = 25 + level;
+          data[idx + 1] = 51 + level;
+          data[idx + 2] = 64 + level;
+        } else {
+          data[idx] = 38 + level;
+          data[idx + 1] = 48 + level;
+          data[idx + 2] = 42 + level;
+        }
+        data[idx + 3] = 255;
       }
     }
     ctx.putImageData(texture, 0, 0);
@@ -221,9 +236,21 @@ export class Radar {
 
   pick(event: MouseEvent): string | undefined {
     const rect = this.canvas.getBoundingClientRect();
+    if (!rect.width || !rect.height) return undefined;
     const x = ((event.clientX - rect.left) * size) / rect.width;
     const y = ((event.clientY - rect.top) * size) / rect.height;
     return this.relays.find((m) => Math.hypot(m.x - x, m.y - y) < 14)?.id;
+  }
+
+  reset(): void {
+    this.relays = [];
+    this.lastTerrain = null;
+    this.tileCenter = [0, 0];
+    this.ctx.clearRect(0, 0, size, size);
+  }
+
+  dispose(): void {
+    this.reset();
   }
 }
 

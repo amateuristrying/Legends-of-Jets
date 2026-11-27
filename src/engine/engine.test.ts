@@ -1,17 +1,26 @@
 import { describe, expect, it } from 'vitest';
 import {
+  AIRCRAFT_WING_GEOMETRY,
+  aircraftBasis,
   GLACIER_VAULT,
   glacierDensity,
   planes,
+  pruneTrail,
+  recordTrailSample,
   solidAt,
+  TRAIL_MAX_AGE,
   VOLCANO,
   volcanoDensity,
+  WING_Y_OFFSET,
+  WINGTIP_OFFSETS,
+  wingtipPositions,
 } from './world';
 import { interpolateFlight, newFlight, SIM_STEP, stepFlight } from './flight';
 import { CAMPAIGN_LEVELS } from './campaign';
 import { createMission, selectRelay, stepMission } from './modes';
+import { Radar } from './radar';
 import { isPlaneUnlocked, DEFAULT_PILOT_LOG } from './storage';
-import type { ControlInput } from './types';
+import type { ControlInput, TrailSample } from './types';
 
 const IDLE: ControlInput = {
   turn: 0,
@@ -123,5 +132,129 @@ describe('Legends of Jets v1.0 Engine', () => {
     const surv = createMission('survival', f);
     expect(surv.wave).toBe(1);
     expect(surv.rings.some((r) => r.isRearm)).toBe(true);
+  });
+
+  it('computes exact per-jet WINGTIP_OFFSETS and 3D wingtip positions across pitch and roll', () => {
+    expect(WINGTIP_OFFSETS).toHaveLength(planes.length);
+    for (let i = 0; i < planes.length; i++) {
+      const geo = AIRCRAFT_WING_GEOMETRY[i];
+      const size = planes[i].size;
+      expect(WINGTIP_OFFSETS[i].x).toBeCloseTo(geo.span * size, 6);
+      expect(WINGTIP_OFFSETS[i].y).toBeCloseTo(WING_Y_OFFSET * size, 6);
+      expect(WINGTIP_OFFSETS[i].z).toBeCloseTo((geo.trailingBase + geo.span * geo.trailingSlope) * size, 6);
+    }
+
+    // Level flight facing +Z (yaw = 0, pitch = 0, roll = 0)
+    const flat = wingtipPositions([10, 200, 30], 1, 0, 0, 0);
+    const mirageTip = WINGTIP_OFFSETS[1];
+    expect(flat.left[0]).toBeCloseTo(10 - mirageTip.x, 5);
+    expect(flat.right[0]).toBeCloseTo(10 + mirageTip.x, 5);
+    expect(flat.left[1]).toBeCloseTo(200 + mirageTip.y, 5);
+    expect(flat.right[1]).toBeCloseTo(200 + mirageTip.y, 5);
+    expect(flat.left[2]).toBeCloseTo(30 + mirageTip.z, 5);
+    expect(flat.right[2]).toBeCloseTo(30 + mirageTip.z, 5);
+
+    // 90-degree roll places right wingtip above aircraft and left wingtip below
+    const banked = wingtipPositions([0, 300, 0], 2, 0, 0, Math.PI / 2);
+    const suTip = WINGTIP_OFFSETS[2];
+    expect(banked.right[1]).toBeCloseTo(300 + suTip.x, 5);
+    expect(banked.left[1]).toBeCloseTo(300 - suTip.x, 5);
+    expect(banked.right[2]).toBeCloseTo(suTip.z, 5);
+
+    // Climbing pitch tilts front upward and shifts trailing-edge wingtips downward
+    const pitch = Math.PI / 6;
+    const basis = aircraftBasis(0, pitch, 0);
+    expect(basis.front[1]).toBeCloseTo(Math.sin(pitch), 5);
+    const climbed = wingtipPositions([0, 300, 0], 0, 0, pitch, 0);
+    expect(climbed.left[1]).toBeLessThan(300);
+    expect(climbed.right[1]).toBeLessThan(300);
+  });
+
+  it('prunes wingtip trail samples smoothly by age without abrupt truncation', () => {
+    const trail: TrailSample[] = [];
+    let lastTime = -1;
+    for (let step = 0; step < 40; step++) {
+      const t = step * 0.05;
+      lastTime = recordTrailSample(trail, lastTime, [0, 300, t * 100], 0, 0, 0, 0, t, 0.05);
+    }
+    expect(trail.length).toBeGreaterThan(20);
+    expect(trail.length).toBeLessThanOrEqual(Math.ceil(TRAIL_MAX_AGE / 0.05) + 3);
+
+    // Stop emitting and advance time past TRAIL_MAX_AGE -> trail drains cleanly
+    const stopTime = 2.0 + TRAIL_MAX_AGE + 0.5;
+    pruneTrail(trail, stopTime);
+    expect(trail).toHaveLength(0);
+  });
+
+  it('caches Radar terrain tiles, picks relay markers, and resets cleanly', () => {
+    const makeCtx = () => {
+      const ops: string[] = [];
+      return {
+        ops,
+        imageSmoothingEnabled: true,
+        lineWidth: 1,
+        strokeStyle: '',
+        fillStyle: '',
+        font: '',
+        createImageData: (w: number, h: number) => ({ width: w, height: h, data: new Uint8ClampedArray(w * h * 4) }),
+        putImageData: () => ops.push('putImageData'),
+        clearRect: () => ops.push('clearRect'),
+        save: () => {},
+        restore: () => {},
+        beginPath: () => {},
+        arc: () => {},
+        clip: () => {},
+        drawImage: () => {},
+        stroke: () => {},
+        moveTo: () => {},
+        lineTo: () => {},
+        fillText: () => {},
+        setLineDash: () => {},
+        fillRect: () => {},
+        translate: () => {},
+        rotate: () => {},
+        closePath: () => {},
+        fill: () => {},
+      };
+    };
+
+    const mainCtx = makeCtx();
+    const surfaceCtx = makeCtx();
+    const prevDoc = globalThis.document;
+    (globalThis as unknown as { document: unknown }).document = {
+      createElement: () => ({ width: 48, height: 48, getContext: () => surfaceCtx }),
+    };
+
+    try {
+      const canvas = {
+        getContext: () => mainCtx,
+        getBoundingClientRect: () => ({ left: 0, top: 0, width: 192, height: 192 }),
+      } as unknown as HTMLCanvasElement;
+
+      const radar = new Radar(canvas);
+      const flight = newFlight(0, [0, 300, 0]);
+      const mission = createMission('story', flight, { levelId: 1 });
+      mission.phase = 'relay';
+
+      radar.draw(flight, mission, 0);
+      expect(radar.lastTerrain).toBeTruthy();
+      expect(surfaceCtx.ops.filter((o) => o === 'putImageData')).toHaveLength(1);
+      expect(radar.relays).toHaveLength(3);
+
+      // Second draw at same position reuses cached terrain tile
+      radar.draw(flight, mission, 0);
+      expect(surfaceCtx.ops.filter((o) => o === 'putImageData')).toHaveLength(1);
+
+      // Clicking near first relay picks its ID
+      const firstRelay = radar.relays[0];
+      const picked = radar.pick({ clientX: firstRelay.x, clientY: firstRelay.y } as MouseEvent);
+      expect(picked).toBe(firstRelay.id);
+
+      radar.reset();
+      expect(radar.lastTerrain).toBeNull();
+      expect(radar.relays).toHaveLength(0);
+    } finally {
+      (globalThis as unknown as { document: unknown }).document = prevDoc;
+    }
   });
 });

@@ -8,7 +8,21 @@ import type {
   Vec3,
   WeaponsState,
 } from './types';
-import { add, clamp, dist3, dot, forward, height, norm, planes, scale, solidAt, sub } from './world';
+import {
+  add,
+  clamp,
+  dist3,
+  dot,
+  forward,
+  height,
+  norm,
+  planes,
+  pruneTrail,
+  recordTrailSample,
+  scale,
+  solidAt,
+  sub,
+} from './world';
 
 export const HOSTILE_TINT: Vec3 = [0.86, 0.23, 0.21];
 export const BOSS_TINT: Vec3 = [0.98, 0.42, 0.12];
@@ -362,23 +376,22 @@ export function createAircraft(
     missiles: opts?.isBoss ? 8 : 3,
     difficulty,
     trail: [],
-    lastTrailTime: 0,
+    lastTrailTime: -1,
   };
 }
 
 function recordAircraftTrail(ac: AircraftEntity, simTime: number): void {
-  if (simTime - ac.lastTrailTime < 0.06) return;
-  ac.lastTrailTime = simTime;
-  const wing: Vec3 = [Math.cos(ac.yaw), 0, -Math.sin(ac.yaw)];
-  const width = [7, 9, 12, 11, 12][ac.type] ?? 8;
-  const back = add(ac.pos, scale(forward(ac.yaw), -4));
-  const delta = add(scale(wing, width * Math.cos(ac.roll)), [0, width * Math.sin(ac.roll), 0]);
-  ac.trail.push({
-    time: simTime,
-    left: add(back, delta),
-    right: add(back, scale(delta, -1)),
-  });
-  if (ac.trail.length > 26) ac.trail.shift();
+  ac.lastTrailTime = recordTrailSample(
+    ac.trail,
+    ac.lastTrailTime,
+    ac.pos,
+    ac.type,
+    ac.yaw,
+    ac.pitch,
+    ac.roll,
+    simTime,
+    0.06
+  );
 }
 
 export function stepAircraftAI(

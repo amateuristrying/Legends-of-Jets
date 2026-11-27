@@ -87,6 +87,12 @@ export interface WeaponsState {
   evade: number;
 }
 
+export interface TrailSample {
+  time: number;
+  left: Vec3;
+  right: Vec3;
+}
+
 export interface AircraftEntity {
   id: string;
   name: string;
@@ -110,7 +116,7 @@ export interface AircraftEntity {
   flareCooldown: number;
   missiles: number;
   difficulty: BotDifficulty;
-  trail: Array<{ time: number; left: Vec3; right: Vec3 }>;
+  trail: TrailSample[];
   lastTrailTime: number;
 }
 

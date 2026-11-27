@@ -1,9 +1,11 @@
-import type { AtmospherePreset, Vec3 } from './types';
+import type { AtmospherePreset, TrailSample, Vec3 } from './types';
 import {
   add,
+  AIRCRAFT_WING_GEOMETRY,
+  aircraftBasis,
+  clamp,
   cross,
   dot,
-  forward,
   GLACIER_VAULT,
   norm,
   planes,
@@ -14,9 +16,13 @@ import {
   TERRAIN_SIZE,
   TERRAIN_TEXELS,
   terrainTile,
+  TRAIL_MAX_AGE,
   VOLCANO,
+  WING_Y_OFFSET,
 } from './world';
 import { glacierSurface, volcanoSurface, type LandmarkMesh } from './landmarks';
+
+export type { TrailSample };
 
 export interface CameraState {
   eye: Vec3;
@@ -36,12 +42,6 @@ export interface RenderObject {
   scale?: number;
   size?: number;
   tint?: Vec3;
-}
-
-export interface TrailSample {
-  time: number;
-  left: Vec3;
-  right: Vec3;
 }
 
 export interface RenderState {
@@ -301,6 +301,30 @@ void main(){
   color=vec4(mix(base,base*vec3(.64,.74,.91)+.045,night*(1.-emissive)),1.);
 }`;
 
+const trailVertex = `#version 300 es
+precision highp float;
+in vec3 a;
+in float alpha;
+out float vAlpha;
+uniform vec3 eye,right,up,front;
+uniform float aspect,fov;
+void main(){
+  vec3 d=a-eye;
+  float z=dot(d,front);
+  gl_Position=vec4(dot(d,right)/(aspect*fov),dot(d,up)/fov,(z-1.)*.999,z);
+  vAlpha=alpha;
+}`;
+
+const trailFragment = `#version 300 es
+precision highp float;
+in float vAlpha;
+out vec4 color;
+uniform float night;
+void main(){
+  vec3 base=mix(vec3(.88,.96,1.),vec3(.56,.70,.88),night);
+  color=vec4(base,clamp(vAlpha,0.,1.));
+}`;
+
 function createProgram(
   gl: WebGL2RenderingContext,
   vertexSource: string,
@@ -362,35 +386,13 @@ export function aircraftPoints(type: number): Float32Array {
         ((y - 0.68) / 1.44) ** 2 <
         1 && y > 0.73;
 
-    let leading: number;
-    let trailing: number;
-    let span: number;
-    if (stealth) {
-      // Diamond stealth wing (YF-23 silhouette)
-      span = 12.2;
-      leading = 5.2 - side * 0.75;
-      trailing = -8.5 + side * 0.55;
-    } else if (twinBoom) {
-      // Forward-swept experimental wings
-      span = 12.6;
-      leading = 1.6 + side * 0.28;
-      trailing = -4.2 + side * 0.15;
-    } else if (delta) {
-      span = 11;
-      leading = 6.5 - side * 1.22;
-      trailing = -8.4 + side * 0.085;
-    } else if (modern) {
-      span = 13;
-      leading = 6.4 - side * 0.7;
-      trailing = -6.5 + side * 0.16;
-    } else {
-      span = 8.6;
-      leading = 2.5 - side * 0.48;
-      trailing = -4.9 + side * 0.13;
-    }
+    const wingGeo = AIRCRAFT_WING_GEOMETRY[type] ?? AIRCRAFT_WING_GEOMETRY[0];
+    const span = wingGeo.span;
+    const leading = wingGeo.leadingBase + side * wingGeo.leadingSlope;
+    const trailing = wingGeo.trailingBase + side * wingGeo.trailingSlope;
 
     const wing =
-      side < span && z < leading && z > trailing && Math.abs(y + 0.26) < 0.34 - side / 95;
+      side < span && z < leading && z > trailing && Math.abs(y - WING_Y_OFFSET) < 0.34 - side / 95;
 
     const elevator =
       !stealth &&
@@ -567,13 +569,17 @@ export class Renderer {
   sky: WebGLProgram;
   terrain: WebGLProgram;
   points: WebGLProgram;
+  trailProgram: WebGLProgram;
   skyPosition: number;
   terrainPosition: number;
   terrainNormal: number;
   terrainOffset: number;
   pointPosition: number;
   pointColor: number;
+  trailPosition: number;
+  trailAlpha: number;
   skyVao: WebGLVertexArrayObject;
+  trailVao: WebGLVertexArrayObject;
   patch: SurfaceHandle;
   instances: WebGLBuffer;
   origins: Float32Array;
@@ -602,6 +608,7 @@ export class Renderer {
     this.sky = createProgram(gl, skyVertex, skyFragment);
     this.terrain = createProgram(gl, surfaceVertex, surfaceFragment);
     this.points = createProgram(gl, pointVertex, pointFragment);
+    this.trailProgram = createProgram(gl, trailVertex, trailFragment);
 
     this.skyPosition = gl.getAttribLocation(this.sky, 'a');
     this.terrainPosition = gl.getAttribLocation(this.terrain, 'a');
@@ -609,6 +616,8 @@ export class Renderer {
     this.terrainOffset = gl.getAttribLocation(this.terrain, 'tileOrigin');
     this.pointPosition = gl.getAttribLocation(this.points, 'a');
     this.pointColor = gl.getAttribLocation(this.points, 'c');
+    this.trailPosition = gl.getAttribLocation(this.trailProgram, 'a');
+    this.trailAlpha = gl.getAttribLocation(this.trailProgram, 'alpha');
 
     const quad = gl.createBuffer()!;
     this.skyVao = gl.createVertexArray()!;
@@ -671,7 +680,15 @@ export class Renderer {
     this.locations = new Map();
     this.elevations = new Map();
     this.trailBuffer = gl.createBuffer()!;
-    this.trailData = new Float32Array(36 * 2 * 6);
+    this.trailData = new Float32Array(64 * 2 * 4);
+    this.trailVao = gl.createVertexArray()!;
+    gl.bindVertexArray(this.trailVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.trailBuffer);
+    gl.enableVertexAttribArray(this.trailPosition);
+    gl.vertexAttribPointer(this.trailPosition, 3, gl.FLOAT, false, 16, 0);
+    gl.enableVertexAttribArray(this.trailAlpha);
+    gl.vertexAttribPointer(this.trailAlpha, 1, gl.FLOAT, false, 16, 12);
+    gl.bindVertexArray(null);
   }
 
   buffer(data: Float32Array): BufferHandle {
@@ -873,8 +890,19 @@ export class Renderer {
     gl.depthMask(true);
     this.drawSurfaces(camera, state, time, objects, width / height);
     this.setup(this.points, camera, state, time);
-    for (const trail of trails) this.drawTrail(trail, time);
     for (const object of objects) this.draw(object);
+
+    if (trails.length > 0) {
+      this.setup(this.trailProgram, camera, state, time);
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      gl.depthMask(false);
+      gl.bindVertexArray(this.trailVao);
+      for (const trail of trails) this.drawTrail(trail, time);
+      gl.bindVertexArray(null);
+      gl.depthMask(true);
+      gl.disable(gl.BLEND);
+    }
   }
 
   pointAttributes(buffer: WebGLBuffer): void {
@@ -892,33 +920,27 @@ export class Renderer {
   drawTrail(trail: TrailSample[], time: number): void {
     if (trail.length < 2) return;
     const gl = this.gl;
-    const uniforms: Record<string, number | Vec3> = {
-      origin: [0, 0, 0],
-      axisX: [1, 0, 0],
-      axisY: [0, 1, 0],
-      axisZ: [0, 0, 1],
-      size: 1,
-      emissive: 0,
-      tintStrength: 0,
-    };
-    for (const [name, value] of Object.entries(uniforms)) this.uniform(this.points, name, value);
+    const maxSamples = Math.floor(this.trailData.length / 8);
+    const start = Math.max(0, trail.length - maxSamples);
+    const count = trail.length - start;
     let offset = 0;
     for (const wing of ['left', 'right'] as const) {
-      for (const point of trail) {
-        const light = Math.max(0.31, 0.86 - (time - point.time) * 0.3);
+      for (let i = start; i < trail.length; i++) {
+        const point = trail[i];
+        const age = Math.max(0, time - point.time);
+        const fade = clamp(1 - age / TRAIL_MAX_AGE, 0, 1);
+        const alpha = fade * fade * 0.72;
         const w = point[wing];
         this.trailData[offset++] = w[0];
         this.trailData[offset++] = w[1];
         this.trailData[offset++] = w[2];
-        this.trailData[offset++] = light * 0.9;
-        this.trailData[offset++] = light * 0.98;
-        this.trailData[offset++] = light;
+        this.trailData[offset++] = alpha;
       }
     }
-    this.pointAttributes(this.trailBuffer);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.trailBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, this.trailData.subarray(0, offset), gl.DYNAMIC_DRAW);
-    gl.drawArrays(gl.LINE_STRIP, 0, trail.length);
-    gl.drawArrays(gl.LINE_STRIP, trail.length, trail.length);
+    gl.drawArrays(gl.LINE_STRIP, 0, count);
+    gl.drawArrays(gl.LINE_STRIP, count, count);
   }
 
   draw(object: RenderObject): void {
@@ -930,12 +952,11 @@ export class Renderer {
     const model =
       structure ?? effect ?? (isFlame ? this.flame : this.models[planeType] ?? this.models[0]);
 
-    const front = forward(object.yaw || 0, object.pitch || 0);
-    const right = norm(cross([0, 1, 0], front));
-    const up = cross(front, right);
-    const roll = object.roll || 0;
-    const rolledRight = add(scale(right, Math.cos(roll)), scale(up, Math.sin(roll)));
-    const rolledUp = add(scale(up, Math.cos(roll)), scale(right, -Math.sin(roll)));
+    const { front, rolledRight, rolledUp } = aircraftBasis(
+      object.yaw || 0,
+      object.pitch || 0,
+      object.roll || 0
+    );
     const modelScale = object.scale ?? 1;
 
     const pointSize = structure
