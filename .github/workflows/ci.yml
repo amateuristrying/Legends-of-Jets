@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  verify:
+    name: Typecheck, Test & Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Run Vitest unit & engine tests
+        run: npm test
+
+      - name: Run Node simulation & Crew multiplayer tests
+        run: node --test tests/*.test.mjs
+
+      - name: Production Vite build
+        run: npm run build
+
+      - name: Offline single-file HTML build
+        run: node build-offline.mjs
