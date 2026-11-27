@@ -1,4 +1,3 @@
-import { authClient, authConfigured, authRoute } from './auth.js';
 import { bad, internal, readBody, reply } from './http.js';
 import { ROOM_ID } from './room.js';
 
@@ -6,54 +5,60 @@ export { CrewDirectory } from './directory.js';
 export { CrewRoom } from './room.js';
 
 const api = '/api/crew/';
-const mutations = new Set(['invite','respond','create','room-response','socket-ticket','close']);
+const mutations = new Set([
+  'session', 'session/keepalive', 'session/end', 'invite', 'respond', 'create',
+  'room-response', 'socket-ticket', 'close',
+]);
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
     if (!url.pathname.startsWith(api)) return env.ASSETS.fetch(request);
     const path = url.pathname.slice(api.length);
-    if ((request.method==='POST' || path.startsWith('socket/')) && request.headers.get('Origin')!==url.origin) {
-      return bad('Request must originate from Legends of Jets.',403);
+    if ((request.method === 'POST' || path.startsWith('socket/')) && request.headers.get('Origin') !== url.origin) {
+      return bad('Request must originate from Legends of Jets.', 403);
     }
+
+    const roomWorker = id => env.CREW_ROOMS.get(env.CREW_ROOMS.idFromName(id));
     try {
-      if (path==='status' && request.method==='GET') return reply({ available:authConfigured(env) });
-      if (path.startsWith('auth/')) return await authRoute(request,env,path.slice(5));
+      if (path === 'status' && request.method === 'GET') return reply({ available: true });
       if (path.startsWith('socket/')) {
         const id = path.slice('socket/'.length);
-        if (!ROOM_ID.test(id)) return bad('Invalid room.',404);
-        return await env.CREW_ROOMS.get(env.CREW_ROOMS.idFromName(id)).fetch(request);
+        if (!ROOM_ID.test(id)) return bad('Invalid room.', 404);
+        return await roomWorker(id).fetch(request);
       }
-      if (!authConfigured(env)) return bad('Crew sign-in is not configured on this server.',503);
-      if (!(path==='home' && request.method==='GET') && !(mutations.has(path) && request.method==='POST')) {
-        return bad('Not found.',404);
+      if (!(path === 'home' && request.method === 'GET') && !(mutations.has(path) && request.method === 'POST')) {
+        return bad('Not found.', 404);
       }
+      const token = request.headers.get('Authorization')?.match(/^Bearer ([a-f0-9-]{36})$/i)?.[1];
+      if (path !== 'session' && !token) return bad('Open Crew to get a pilot code.', 401);
       let body = {};
-      if (request.method==='POST') {
+      if (request.method === 'POST') {
         try { body = await readBody(request); } catch { return bad('Invalid request.'); }
       }
-      const { client,apply } = authClient(request,env);
-      const { data,error } = await client.auth.getUser();
-      if (error || !data.user) return apply(bad('Sign in to play Crew.',401));
-      const { id,user_metadata } = data.user;
-      const user = { id,name:user_metadata?.display_name || user_metadata?.full_name || user_metadata?.name || 'Pilot' };
-      const directory = env.CREW_DIRECTORY.get(env.CREW_DIRECTORY.idFromName('pilot-directory'));
-      if (path==='socket-ticket') {
-        const response = await directory.fetch(internal('/room',{ user,body }));
-        if (!response.ok) return apply(response);
-        const { me,room } = await response.json();
+      const ip = request.headers.get('CF-Connecting-IP') ?? 'unknown';
+      const directory = env.CREW_DIRECTORY.get(env.CREW_DIRECTORY.idFromName('guest:' + url.hostname));
+      const payload = { token, body, ip };
+      if (path === 'socket-ticket') {
+        const response = await directory.fetch(internal('/room', payload));
+        if (!response.ok) return response;
+        const { me, room } = await response.json();
         const plane = [0,1,2,3,4].includes(body.plane) ? body.plane : 0;
-        const stub = env.CREW_ROOMS.get(env.CREW_ROOMS.idFromName(room.id));
-        return apply(await stub.fetch(internal('/ticket',{ me,room,plane })));
+        return await roomWorker(room.id).fetch(internal('/ticket', { me, room, plane }));
       }
-      const response = await directory.fetch(internal('/'+path,{user,body}));
-      if (path==='close' && response.ok) {
-        await env.CREW_ROOMS.get(env.CREW_ROOMS.idFromName(body.room)).fetch(internal('/terminate',{}));
+      const response = await directory.fetch(internal('/' + path, payload));
+      if (path === 'close' && response.ok) {
+        ctx.waitUntil(roomWorker(body.room).fetch(internal('/terminate', {})));
       }
-      return apply(response);
+      if (path === 'session/end' && response.ok) {
+        const { closedRooms } = await response.json();
+        ctx.waitUntil(Promise.all(closedRooms.map(id => roomWorker(id).fetch(internal('/terminate', {})))));
+        return reply({ ok: true });
+      }
+      return response;
     } catch (error) {
-      console.error('Crew request failed:',error?.name);
-      return bad('Crew is temporarily unavailable. Try again.',500);
+      console.error('Crew request failed:', error?.name);
+      return bad('Crew is temporarily unavailable. Try again.', 500);
     }
   },
 };

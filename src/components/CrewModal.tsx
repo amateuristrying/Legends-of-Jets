@@ -25,7 +25,6 @@ export const CrewModal: React.FC<Props> = ({
   const [available, setAvailable] = useState<boolean | null>(null);
   const [profile, setProfile] = useState<CrewProfile | null>(null);
   const [lobby, setLobby] = useState<CrewLobby | null>(crew.lobby);
-  const [tab, setTab] = useState<'login' | 'signup'>('login');
   const [notice, setNotice] = useState<{ text: string; error: boolean }>({ text: '', error: false });
   const [busy, setBusy] = useState(false);
   const [rules, setRules] = useState<CrewRules>({
@@ -87,20 +86,6 @@ export const CrewModal: React.FC<Props> = ({
     }
   };
 
-  const handleAuth = (e: React.FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    const data = Object.fromEntries(new FormData(e.currentTarget)) as Record<string, string>;
-    runAction(async () => {
-      const res = await crew.auth(tab, data);
-      if (res.verify) {
-        setTab('login');
-        setNotice({ text: 'Check your inbox to verify your email, then sign in.', error: false });
-        return;
-      }
-      setProfile(await crew.home());
-    });
-  };
-
   const friends = profile?.connections.filter((c) => c.status === 'accepted') ?? [];
   const invites = profile?.connections.filter((c) => c.status === 'pending') ?? [];
 
@@ -116,58 +101,16 @@ export const CrewModal: React.FC<Props> = ({
             <span className="eyebrow">CREW MULTIPLAYER</span>
             <h2>Online Play</h2>
             <p>
-              Open Legends of Jets on your Cloudflare Worker / online server to sign in with
-              Supabase Auth and fly 1v1, 2v2, or Co-op vs Bots with friends. For offline dogfights
-              right now, use the <strong>Skirmish</strong> mode from the hangar!
+              Open the online build to get a temporary code and fly with friends. For offline
+              dogfights, use <strong>Skirmish</strong> from the hangar.
             </p>
-          </>
-        ) : available === null ? (
-          <>
-            <span className="eyebrow">CREW</span>
-            <h2>Pilot Network</h2>
-            <p>Checking connection…</p>
           </>
         ) : !profile ? (
           <>
             <span className="eyebrow">CREW</span>
-            <h2>{tab === 'signup' ? 'Create Pilot Account' : 'Pilot Sign-In'}</h2>
-            <p>Sign in to get a personal six-digit code and fly with your crew.</p>
-            <div className="act-tabs">
-              <button className={tab === 'login' ? 'active' : ''} onClick={() => setTab('login')}>
-                Sign in
-              </button>
-              <button className={tab === 'signup' ? 'active' : ''} onClick={() => setTab('signup')}>
-                Create account
-              </button>
-            </div>
-            <form className="crew-form" onSubmit={handleAuth}>
-              {tab === 'signup' && (
-                <label>
-                  Callsign <input name="name" maxLength={28} required />
-                </label>
-              )}
-              <label>
-                Email <input name="email" type="email" required />
-              </label>
-              <label>
-                Password <input name="password" type="password" minLength={tab === 'signup' ? 8 : 1} required />
-              </label>
-              <button className="primary" type="submit" disabled={busy}>
-                {tab === 'signup' ? 'Create account' : 'Sign in'}
-              </button>
-              <a
-                style={{
-                  color: '#bce5dc',
-                  padding: 11,
-                  border: '1px solid #647e8c',
-                  textAlign: 'center',
-                  textDecoration: 'none',
-                }}
-                href="/api/crew/auth/google"
-              >
-                Continue with Google
-              </a>
-            </form>
+            <h2>Pilot Network</h2>
+            <p>{notice.error ? 'Your code is not available yet.' : 'Getting your pilot code…'}</p>
+            {notice.error && <button className="secondary" onClick={refresh}>Try Again</button>}
           </>
         ) : lobby ? (
           <>
@@ -251,22 +194,23 @@ export const CrewModal: React.FC<Props> = ({
         ) : (
           <>
             <span className="eyebrow">SQUADRON · PILOT CODE {profile.me.code}</span>
-            <h2>{profile.me.name}’s Crew</h2>
+            <h2>Your Crew</h2>
+            <p>Share this code with a friend and keep this tab open. Reloading gives you a new code.</p>
             <div className="btn-row" style={{ marginBottom: 14 }}>
               <button
                 className="secondary"
                 onClick={() => {
-                  navigator.clipboard?.writeText(profile.me.code).catch(() => {});
-                  setNotice({ text: `Copied pilot code ${profile.me.code}.`, error: false });
+                  const code = profile.me.code;
+                  if (!navigator.clipboard) {
+                    setNotice({ text: `Share this code: ${code}`, error: false });
+                    return;
+                  }
+                  void navigator.clipboard.writeText(code)
+                    .then(() => setNotice({ text: 'Pilot code copied.', error: false }))
+                    .catch(() => setNotice({ text: `Share this code: ${code}`, error: false }));
                 }}
               >
                 Copy Code ({profile.me.code})
-              </button>
-              <button
-                className="secondary"
-                onClick={() => runAction(async () => { await crew.logout(); setProfile(null); })}
-              >
-                Sign Out
               </button>
             </div>
 
@@ -286,6 +230,8 @@ export const CrewModal: React.FC<Props> = ({
               <input
                 value={friendCode}
                 onChange={(e) => setFriendCode(e.target.value)}
+                aria-label="Friend’s six-digit code"
+                inputMode="numeric"
                 pattern="[0-9]{6}"
                 maxLength={6}
                 placeholder="6-digit friend code"
@@ -441,7 +387,7 @@ export const CrewModal: React.FC<Props> = ({
         )}
 
         {notice.text && (
-          <p style={{ color: notice.error ? '#ffb4a8' : '#bdeadf', marginTop: 14 }}>{notice.text}</p>
+          <p role="status" style={{ color: notice.error ? '#ffb4a8' : '#bdeadf', marginTop: 14 }}>{notice.text}</p>
         )}
       </div>
     </div>

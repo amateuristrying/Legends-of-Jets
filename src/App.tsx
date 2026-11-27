@@ -476,6 +476,8 @@ export const App: React.FC = () => {
     setViewIndex((v) => (v + 1) % views.length);
   }, []);
 
+  useEffect(() => crewRef.current!.startPresence(), []);
+
   // Wire Crew WebSocket callbacks
   useEffect(() => {
     const crew = crewRef.current!;

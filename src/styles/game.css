@@ -1105,8 +1105,7 @@ kbd {
   margin: 10px 0;
 }
 
-.crew-rules label,
-.crew-form label {
+.crew-rules label {
   display: grid;
   gap: 5px;
   font-size: 13px;
@@ -1114,20 +1113,12 @@ kbd {
 }
 
 .crew-rules select,
-.crew-form input,
 .crew-invite input {
   color: #f2f6f4;
   background: #0d1c27;
   border: 1px solid #647e8c;
   padding: 9px;
   font: inherit;
-}
-
-.crew-form {
-  display: grid;
-  gap: 12px;
-  max-width: 420px;
-  margin-top: 12px;
 }
 
 /* Touch controls */

@@ -60,11 +60,18 @@ export interface CrewSnapshot {
   effects: Array<{ kind: 'spark' | 'flare'; pos: Vec3; size: number }>;
 }
 
-async function request<T = Record<string, unknown>>(path: string, data?: unknown): Promise<T> {
-  const options: RequestInit = { credentials: 'same-origin', cache: 'no-store' };
+async function request<T = Record<string, unknown>>(
+  path: string,
+  data?: unknown,
+  token?: string,
+  keepalive = false,
+): Promise<T> {
+  const headers = new Headers();
+  if (token) headers.set('Authorization', 'Bearer ' + token);
+  const options: RequestInit = { credentials: 'omit', cache: 'no-store', headers, keepalive };
   if (data !== undefined) {
     options.method = 'POST';
-    options.headers = { 'Content-Type': 'application/json' };
+    headers.set('Content-Type', 'application/json');
     options.body = JSON.stringify(data);
   }
   const response = await fetch(api + path, options);
@@ -91,6 +98,9 @@ export class CrewClient {
   private lastSendAt = 0;
   private retries = 0;
   private closedSockets = new WeakSet<WebSocket>();
+  private token: string | null = null;
+  private opening: Promise<string> | null = null;
+  private pageGeneration = 0;
 
   onLobby?: (lobby: CrewLobby | null) => void;
   onFrame?: (snapshot: CrewSnapshot, id: string) => void;
@@ -104,38 +114,114 @@ export class CrewClient {
     return res.available;
   }
 
+  private async session(): Promise<string> {
+    if (this.token) return this.token;
+    if (this.opening) return this.opening;
+    const generation = this.pageGeneration;
+    const pending = request<{ token: string }>('session', {}).then(({ token }) => {
+      if (generation !== this.pageGeneration) {
+        void request('session/end', {}, token, true).catch(() => {});
+        throw new Error('The game tab was closed.');
+      }
+      this.token = token;
+      return token;
+    });
+    this.opening = pending;
+    try {
+      return await pending;
+    } finally {
+      if (this.opening === pending) this.opening = null;
+    }
+  }
+
+  private async pilotRequest<T>(path: string, data?: unknown, retry = false): Promise<T> {
+    const token = await this.session();
+    try {
+      return await request<T>(path, data, token);
+    } catch (error) {
+      if ((error as { status?: number }).status !== 401) throw error;
+      if (this.token === token) {
+        this.token = null;
+        if (this.room) {
+          this.disconnect();
+          this.onClosed?.('Crew session expired. Share your new pilot code to reconnect.');
+        }
+      }
+      if (retry) return request<T>(path, data, await this.session());
+      throw error;
+    }
+  }
+
+  startPresence(): () => void {
+    if (location.protocol === 'file:') return () => {};
+    let mounted = true, pageOpen = true, refreshing = false, leftRoom = false;
+    const warmup = async () => {
+      if (await this.checkStatus() && mounted && pageOpen) await this.session();
+    };
+    const maintain = async () => {
+      if (!mounted || !pageOpen || !this.token || refreshing) return;
+      refreshing = true;
+      try {
+        await this.pilotRequest('session/keepalive', {});
+      } catch (error) {
+        if ((error as { status?: number }).status === 401 && mounted && pageOpen) {
+          await this.session().catch(() => {});
+        }
+      } finally {
+        refreshing = false;
+      }
+    };
+    const pageHide = () => {
+      pageOpen = false;
+      leftRoom = this.room !== null;
+      this.pageGeneration++;
+      const token = this.token;
+      this.token = null;
+      this.opening = null;
+      this.disconnect();
+      if (token) void request('session/end', {}, token, true).catch(() => {});
+    };
+    const pageShow = (event: PageTransitionEvent) => {
+      if (!event.persisted) return;
+      pageOpen = true;
+      if (leftRoom) this.onClosed?.('The previous Crew session ended. Share your new pilot code.');
+      void warmup().catch(() => {});
+    };
+    void warmup().catch(() => {});
+    const timer = window.setInterval(() => { void maintain(); }, 25_000);
+    window.addEventListener('pagehide', pageHide);
+    window.addEventListener('pageshow', pageShow);
+    return () => {
+      mounted = false;
+      window.clearInterval(timer);
+      window.removeEventListener('pagehide', pageHide);
+      window.removeEventListener('pageshow', pageShow);
+    };
+  }
+
   async home(): Promise<CrewProfile> {
-    return request<CrewProfile>('home');
-  }
-
-  async auth(tab: 'login' | 'signup', payload: Record<string, string>): Promise<{ verify?: boolean }> {
-    return request<{ verify?: boolean }>('auth/' + tab, payload);
-  }
-
-  async logout(): Promise<void> {
-    await request('auth/logout', {});
-    this.disconnect();
+    return this.pilotRequest<CrewProfile>('home', undefined, true);
   }
 
   async invite(code: string): Promise<{ message: string }> {
-    return request<{ message: string }>('invite', { code });
+    return this.pilotRequest('invite', { code });
   }
 
   async respondFriend(pilot: string, accept: boolean): Promise<{ message: string }> {
-    return request<{ message: string }>('respond', { pilot, accept });
+    return this.pilotRequest('respond', { pilot, accept });
   }
 
   async createRoom(guests: string[], rules: CrewRules): Promise<{ room: CrewProfile['rooms'][number] }> {
-    return request('create', { guests, rules });
+    return this.pilotRequest('create', { guests, rules });
   }
 
   async respondRoom(room: string, accept: boolean): Promise<{ room?: CrewProfile['rooms'][number] }> {
-    return request('room-response', { room, accept });
+    return this.pilotRequest('room-response', { room, accept });
   }
 
   async closeRoom(): Promise<void> {
     if (!this.room) return;
-    await request('close', { room: this.room });
+    await this.pilotRequest('close', { room: this.room });
     this.disconnect();
   }
 
@@ -148,7 +234,7 @@ export class CrewClient {
     this.onStatus?.('Connecting to lobby…', false);
     let ticket: string;
     try {
-      ({ ticket } = await request<{ ticket: string }>('socket-ticket', { room, plane }));
+      ({ ticket } = await this.pilotRequest<{ ticket: string }>('socket-ticket', { room, plane }));
     } catch (error) {
       if (this.room === room) this.room = null;
       throw error;

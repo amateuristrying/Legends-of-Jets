@@ -1,6 +1,6 @@
 # Legends of Jets
 
-An atmospheric **WebGL2** aerial combat and free-flight game built with **Vite + React 19 + TypeScript**, featuring non-repeating procedural terrain with real-time weapon crater deformation, origin-centered active and dormant volcano landmarks, a 30-level 5-Act campaign, and authoritative **Crew** multiplayer powered by **Cloudflare Workers + Durable Objects + Supabase Auth**.
+An atmospheric **WebGL2** aerial combat and free-flight game built with **Vite + React 19 + TypeScript**, featuring non-repeating procedural terrain with real-time weapon crater deformation, origin-centered active and dormant volcano landmarks, a 30-level 5-Act campaign, and authoritative **Crew** multiplayer powered by **Cloudflare Workers and in-memory Durable Objects**.
 
 ---
 
@@ -96,7 +96,7 @@ All bindings are customizable in **Settings**, with full support for **Mouse-Aim
 │   └── api/crew/           # Cloudflare Pages fallback proxy for Crew API
 ├── server/
 │   ├── index.js            # Worker entrypoint & /api/crew/* router
-│   ├── auth.js             # Supabase JWT verification
+│   ├── guest-directory.js  # Temporary codes, invites, and lobby access
 │   ├── directory.js        # CrewDirectory Durable Object (matchmaking/rooms)
 │   ├── room.js             # CrewRoom Durable Object (WebSocket state loop)
 │   ├── match.js            # Authoritative multiplayer match simulation
@@ -109,3 +109,26 @@ All bindings are customizable in **Settings**, with full support for **Mouse-Aim
 │   └── styles/             # Tactical HUD & UI styling
 └── tests/                  # Node server simulation & Crew multiplayer tests
 ```
+
+## Play Crew without accounts
+
+1. Both players open the hosted game and select **Crew**. Each game tab receives a temporary six-digit code. There is no sign-up.
+2. Copy your code to a friend, or enter their code and send an invite. The recipient accepts, then the host creates a lobby and invites the accepted pilots.
+3. Keep the same game tabs open while you play. Reloading a tab creates a new code. Any invites and lobby access tied to the old code expire. A Worker restart can also clear active sessions.
+
+Codes, invite lists, and online matches live in memory. Guest sessions use browser memory and expire after a short period of inactivity. Single-player saves and settings use browser storage independently of Crew.
+
+### Deploy Crew at the existing Pages address
+
+Build and deploy the Cloudflare Worker from the repository root:
+
+```sh
+npm ci
+npm run build
+npx wrangler login
+npx wrangler deploy
+```
+
+No authentication provider, database setup, or environment variables are required. The included Wrangler configuration creates the Durable Object classes. The application uses their memory without writing Crew data to disk.
+
+To keep `legends-of-jets.pages.dev`, open the Pages project’s **Settings → Bindings → Add → Service binding**. Set the Production variable name to `CREW_BACKEND` and select the `legends-of-jets` Worker. In the Pages build settings, use `npm run build` and output directory `dist`, then redeploy Pages. The [Crew status endpoint](https://legends-of-jets.pages.dev/api/crew/status) should return `{"available":true}` when the binding is connected. You can also play directly at the Worker URL that Wrangler prints.
