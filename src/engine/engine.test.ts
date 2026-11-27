@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   AIRCRAFT_WING_GEOMETRY,
   aircraftBasis,
+  centralRefuelPosition,
   GLACIER_VAULT,
   glacierDensity,
   planes,
@@ -17,7 +18,7 @@ import {
 } from './world';
 import { interpolateFlight, newFlight, SIM_STEP, stepFlight } from './flight';
 import { CAMPAIGN_LEVELS } from './campaign';
-import { createMission, selectRelay, stepMission } from './modes';
+import { computeRank, createMission, selectRelay, stepMission } from './modes';
 import { Radar } from './radar';
 import { isPlaneUnlocked, DEFAULT_PILOT_LOG } from './storage';
 import type { ControlInput, TrailSample } from './types';
@@ -57,7 +58,7 @@ describe('Legends of Jets v1.0 Engine', () => {
     expect(solidAt(GLACIER_VAULT.x, GLACIER_VAULT.tunnelAltitude, GLACIER_VAULT.z - 200, 1)).toBe(false);
   });
 
-  it('sim-lite flight physics models dive acceleration, climb speed bleed, and afterburner fuel', () => {
+  it('sim-lite flight physics models dive acceleration, climb speed bleed, and dynamic fuel burn', () => {
     const climbing = newFlight(0, [0, 350, 0]);
     const diving = newFlight(0, [0, 500, 0]);
     for (let i = 0; i < 180; i++) {
@@ -67,10 +68,11 @@ describe('Legends of Jets v1.0 Engine', () => {
     expect(diving.speed).toBeGreaterThan(climbing.speed + 20);
 
     const boosting = newFlight(2, [0, 350, 0]);
+    const startFuel = boosting.fuel;
     for (let i = 0; i < 120; i++) {
       stepFlight(boosting, { boost: true }, 0, SIM_STEP, 'sim-lite');
     }
-    expect(boosting.afterburnerFuel).toBeLessThan(0.95);
+    expect(boosting.fuel).toBeLessThan(startFuel - 2);
   });
 
   it('interpolates roll across wrap boundary cleanly', () => {
@@ -255,6 +257,123 @@ describe('Legends of Jets v1.0 Engine', () => {
       expect(radar.relays).toHaveLength(0);
     } finally {
       (globalThis as unknown as { document: unknown }).document = prevDoc;
+    }
+  });
+
+  it('removes lives from FlightState and grades computeRank purely on time and hull integrity', () => {
+    const flight = newFlight(0, [0, 300, 0]);
+    expect('lives' in flight).toBe(false);
+    expect(flight.fuel).toBe(planes[0].fuelCapacity);
+    expect(flight.maxFuel).toBe(planes[0].fuelCapacity);
+
+    expect(computeRank(75, 100, 1.0)).toBe('S');
+    expect(computeRank(75, 100, 0.75)).toBe('S');
+    // Fast completion with damaged hull (<75%) drops from S to A
+    expect(computeRank(75, 100, 0.55)).toBe('A');
+    expect(computeRank(110, 100, 0.5)).toBe('A');
+    // Heavy hull damage (<45%) or slower time drops to B / C
+    expect(computeRank(110, 100, 0.2)).toBe('B');
+    expect(computeRank(140, 100, 0.9)).toBe('B');
+    expect(computeRank(170, 100, 1.0)).toBe('C');
+  });
+
+  it('scales dynamic fuel burn across boost, cruise, climb, turn, and brake, and flames out at 0%', () => {
+    const cruise = newFlight(0, [0, 400, 0]);
+    const boost = newFlight(0, [0, 400, 0]);
+    const brake = newFlight(0, [0, 400, 0]);
+    const climb = newFlight(0, [0, 400, 0]);
+    const bank = newFlight(0, [0, 400, 0]);
+
+    for (let i = 0; i < 120; i++) {
+      stepFlight(cruise, {}, 0, SIM_STEP, 'arcade');
+      stepFlight(boost, { boost: true }, 0, SIM_STEP, 'sim-lite');
+      stepFlight(brake, { brake: true }, 0, SIM_STEP, 'arcade');
+      stepFlight(climb, { pitch: 0.9 }, 0, SIM_STEP, 'arcade');
+      stepFlight(bank, { turn: 1 }, 0, SIM_STEP, 'arcade');
+    }
+
+    const cruiseBurn = cruise.maxFuel - cruise.fuel;
+    const boostBurn = boost.maxFuel - boost.fuel;
+    const brakeBurn = brake.maxFuel - brake.fuel;
+    const climbBurn = climb.maxFuel - climb.fuel;
+    const bankBurn = bank.maxFuel - bank.fuel;
+
+    expect(boostBurn).toBeGreaterThan(cruiseBurn * 2.4);
+    expect(boostBurn).toBeLessThan(cruiseBurn * 3.4);
+    expect(brakeBurn).toBeLessThan(cruiseBurn * 0.6);
+    expect(climbBurn).toBeGreaterThan(cruiseBurn * 1.15);
+    expect(bankBurn).toBeGreaterThan(cruiseBurn * 1.1);
+
+    // Low fuel alert below 20%
+    const low = newFlight(0, [0, 400, 0]);
+    low.fuel = low.maxFuel * 0.19;
+    stepFlight(low, {}, 0, SIM_STEP, 'arcade');
+    expect(low.lowFuel).toBe(true);
+    expect(low.flameout).toBe(false);
+
+    // Flameout at 0% fuel: disables boost and bleeds airspeed into a glide
+    const empty = newFlight(0, [0, 500, 0]);
+    empty.fuel = 0.001;
+    const startSpeed = empty.speed;
+    for (let i = 0; i < 180; i++) {
+      stepFlight(empty, { boost: true }, 0, SIM_STEP, 'arcade');
+    }
+    expect(empty.fuel).toBe(0);
+    expect(empty.flameout).toBe(true);
+    expect(empty.lowFuel).toBe(true);
+    expect(empty.boost).toBeLessThan(0.05);
+    expect(empty.speed).toBeLessThan(startSpeed * 0.75);
+  });
+
+  it('transitions immediately to failed on hull 0 in story/timetrial/survival while keeping respawn in endless/skirmish', () => {
+    for (const mode of ['story', 'timetrial', 'survival'] as const) {
+      const f = newFlight(0, [0, 300, 0]);
+      const m = createMission(mode, f, { levelId: 2, timeTrialCourse: 'caldera', map: 0 });
+      f.hull = 0;
+      f.death = 1.45;
+      const ev = stepMission(m, f, IDLE, 0, SIM_STEP);
+      expect(m.phase).toBe('failed');
+      expect(ev.phaseChanged).toBe(true);
+    }
+
+    const endlessFlight = newFlight(0, [0, 300, 0]);
+    const endlessMission = createMission('endless', endlessFlight, { map: 0 });
+    endlessFlight.hull = 0;
+    endlessFlight.death = 0.01;
+    stepFlight(endlessFlight, IDLE, 0, 0.02, 'arcade');
+    stepMission(endlessMission, endlessFlight, IDLE, 0, 0.02);
+    expect(endlessFlight.recovered).toBe(true);
+    expect(endlessMission.phase).toBe('free-flight');
+  });
+
+  it('restores fuel, repairs hull, and replenishes munitions at the central volcano refuel station on both maps', () => {
+    for (const map of [0, 1] as const) {
+      const depot = centralRefuelPosition(map);
+      expect(solidAt(depot[0], depot[1], depot[2], map, 4)).toBe(false);
+
+      const flight = newFlight(2, depot);
+      const mission = createMission('story', flight, { levelId: map === 0 ? 2 : 11, map });
+      flight.fuel = flight.maxFuel * 0.1;
+      flight.lowFuel = true;
+      flight.flameout = true;
+      flight.hull = 25;
+      mission.arms.missiles = 0;
+      mission.arms.rockets = 1;
+      mission.arms.flaresLeft = 0;
+      mission.arms.heat = 0.9;
+      mission.arms.overheated = true;
+
+      const ev = stepMission(mission, flight, IDLE, map, SIM_STEP);
+      expect(ev.rearmed).toBe(true);
+      expect(flight.fuel).toBe(flight.maxFuel);
+      expect(flight.lowFuel).toBe(false);
+      expect(flight.flameout).toBe(false);
+      expect(flight.hull).toBe(flight.maxHull);
+      expect(mission.arms.missiles).toBe(planes[2].missiles);
+      expect(mission.arms.rockets).toBe(planes[2].rockets);
+      expect(mission.arms.flaresLeft).toBe(planes[2].flares);
+      expect(mission.arms.overheated).toBe(false);
+      expect(mission.message).toMatch(/VOLCANO CORE DEPOT/i);
     }
   });
 });

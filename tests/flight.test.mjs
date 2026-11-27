@@ -15,7 +15,8 @@ test('crash recovers above the exact horizontal impact position on both maps', (
     while (flight.death) stepFlight(flight, neutral, map, SIM_STEP);
     assert.deepEqual([flight.pos[0], flight.pos[2]], [x, z]);
     assert.ok(flight.pos[1] >= height(x, z, map) + 95);
-    assert.equal(flight.lives, 2);
+    assert.equal(flight.recovered, true);
+    assert.equal('lives' in flight, false);
     assert.equal(flight.type, 2);
     assert.equal(flight.pitch, 0);
   }

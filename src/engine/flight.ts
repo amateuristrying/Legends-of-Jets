@@ -19,10 +19,13 @@ export function newFlight(type: number, position: Vec3 = [0, 126, -45]): FlightS
     stunt: 0,
     speed: plane.speed,
     boost: 0,
-    afterburnerFuel: 1,
+    fuel: plane.fuelCapacity,
+    maxFuel: plane.fuelCapacity,
+    fuelBurnRate: 1,
+    lowFuel: false,
+    flameout: false,
     stalling: false,
     gLoad: 1,
-    lives: 1,
     death: 0,
     recovered: false,
     hull: plane.hull,
@@ -45,7 +48,6 @@ export function stepFlight(
     const fresh = newFlight(flight.type, position);
     Object.assign(flight, fresh, {
       yaw: flight.yaw,
-      lives: flight.lives + 1,
       recovered: true,
     });
     return;
@@ -55,39 +57,59 @@ export function stepFlight(
   const turnIn = clamp(input.turn ?? 0, -1, 1);
   const pitchIn = clamp(input.pitch ?? 0, -1, 1);
   const brakeIn = Boolean(input.brake);
-  let boostWanted = Boolean(input.boost) && !brakeIn;
-
-  if (flightModel === 'sim-lite') {
-    if (boostWanted && flight.afterburnerFuel > 0.04) {
-      flight.afterburnerFuel = Math.max(0, flight.afterburnerFuel - dt * 0.22);
-    } else {
-      boostWanted = false;
-      flight.afterburnerFuel = Math.min(1, flight.afterburnerFuel + dt * 0.14);
-    }
+  if (flight.fuel <= 0) {
+    flight.fuel = 0;
+    flight.flameout = true;
   } else {
-    flight.afterburnerFuel = 1;
+    flight.flameout = false;
   }
+  const boostWanted = !flight.flameout && Boolean(input.boost) && !brakeIn;
 
   flight.boost = approach(flight.boost, Number(boostWanted), 4.7, dt);
 
   if (flightModel === 'sim-lite') {
     // Energy/gravity flight physics: dive accelerates, climb bleeds speed, hard turns bleed energy
-    const throttleTarget = plane.speed * (brakeIn ? 0.56 : 1 + flight.boost * 0.85);
+    const throttleTarget = flight.flameout
+      ? plane.speed * (brakeIn ? 0.22 : 0.34)
+      : plane.speed * (brakeIn ? 0.56 : 1 + flight.boost * 0.85);
     const gravityAccel = -Math.sin(flight.pitch) * 62;
     const turnDrag = Math.abs(flight.bank) * 18;
-    const desiredSpeed = clamp(throttleTarget, plane.speed * 0.44, plane.speed * 2.15);
-    flight.speed = approach(flight.speed, desiredSpeed, 1.85, dt) + (gravityAccel - turnDrag) * dt;
-    flight.speed = clamp(flight.speed, plane.speed * 0.36, plane.speed * 2.25);
+    const desiredSpeed = clamp(
+      throttleTarget,
+      plane.speed * (flight.flameout ? 0.22 : 0.44),
+      plane.speed * 2.15
+    );
+    flight.speed =
+      approach(flight.speed, desiredSpeed, flight.flameout ? 0.75 : 1.85, dt) +
+      (gravityAccel - turnDrag) * dt;
+    flight.speed = clamp(
+      flight.speed,
+      plane.speed * (flight.flameout ? 0.22 : 0.36),
+      plane.speed * 2.25
+    );
 
     const stallThreshold = plane.speed * 0.52;
     flight.stalling = flight.speed < stallThreshold;
-    flight.gLoad = 1 + Math.abs(flight.bank) * (flight.speed / plane.speed) * 4.2 + Math.max(0, pitchIn) * 2.1;
+    flight.gLoad =
+      1 + Math.abs(flight.bank) * (flight.speed / plane.speed) * 4.2 + Math.max(0, pitchIn) * 2.1;
 
     const authority = flight.stalling ? 0.45 : clamp(flight.speed / plane.speed, 0.65, 1.15);
     flight.bank = approach(flight.bank, -turnIn * 0.9, 5.6 * authority, dt);
-    const targetPitch = flight.stalling ? -0.45 : pitchIn * 0.88;
+    const targetPitch = flight.stalling
+      ? -0.45
+      : flight.flameout
+        ? clamp(pitchIn * 0.82, -0.88, 0.35)
+        : pitchIn * 0.88;
     flight.pitch = approach(flight.pitch, targetPitch, 4.8 * authority, dt);
     flight.yaw += -flight.bank * plane.turn * authority * dt;
+  } else if (flight.flameout) {
+    flight.speed = approach(flight.speed, plane.speed * (brakeIn ? 0.24 : 0.36), 0.7, dt);
+    flight.stalling = flight.speed < plane.speed * 0.52;
+    flight.gLoad = 1 + Math.abs(flight.bank) * 3.5;
+    flight.bank = approach(flight.bank, -turnIn * 0.85, 6, dt);
+    const targetPitch = flight.stalling ? Math.min(pitchIn * 0.65, -0.24) : clamp(pitchIn * 0.75, -0.85, 0.25);
+    flight.pitch = approach(flight.pitch, targetPitch, 4.2, dt);
+    flight.yaw += -flight.bank * plane.turn * dt;
   } else {
     flight.stalling = false;
     flight.gLoad = 1 + Math.abs(flight.bank) * 3.5;
@@ -101,6 +123,31 @@ export function stepFlight(
     flight.pitch = approach(flight.pitch, pitchIn * 0.85, 5.4, dt);
     flight.yaw += -flight.bank * plane.turn * dt;
   }
+
+  // Dynamic fuel depletion across flight modes
+  if (!flight.flameout) {
+    const speedRatio = clamp(flight.speed / Math.max(1, plane.speed), 0.35, 2.2);
+    const speedFactor = 0.75 + 0.25 * speedRatio;
+    const throttleFactor =
+      brakeIn && !boostWanted ? 0.4 : boostWanted ? 2.5 : 1 + flight.boost * 1.5;
+    const climbFactor = 1 + Math.max(0, Math.sin(flight.pitch)) * 0.65;
+    const gFactor = 1 + Math.max(0, flight.gLoad - 1) * 0.1;
+    const glideFactor =
+      !boostWanted && flight.pitch < -0.12
+        ? mix(1, 0.55, clamp((-Math.sin(flight.pitch) - 0.12) / 0.6, 0, 1))
+        : 1;
+    const burnRate = throttleFactor * speedFactor * climbFactor * gFactor * glideFactor;
+    flight.fuelBurnRate = burnRate;
+    flight.fuel = Math.max(0, flight.fuel - burnRate * dt);
+    if (flight.fuel <= 0) {
+      flight.fuel = 0;
+      flight.flameout = true;
+      flight.fuelBurnRate = 0;
+    }
+  } else {
+    flight.fuelBurnRate = 0;
+  }
+  flight.lowFuel = flight.maxFuel > 0 ? flight.fuel / flight.maxFuel < 0.2 : true;
 
   if (input.roll && !flight.stunt) flight.stunt = 0.001;
   if (flight.stunt) {

@@ -35,7 +35,7 @@ function spawn(pilot, map) {
   const z = ARENA_CENTER[2] - dir * 410;
   const altitude = Math.max(550, height(x,z,map) + 125);
   if (pilot.flight) {
-    Object.assign(pilot.flight, newFlight(pilot.type, [x,altitude,z]), { lives: pilot.flight.lives, recovered: true });
+    Object.assign(pilot.flight, newFlight(pilot.type, [x,altitude,z]), { recovered: true });
   } else pilot.flight = newFlight(pilot.type, [x,altitude,z]);
   pilot.flight.yaw = dir === 1 ? 0 : Math.PI;
   pilot.outside = 0;

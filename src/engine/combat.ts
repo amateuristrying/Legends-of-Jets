@@ -697,7 +697,7 @@ export function updateShots(
           explosionBurst(mission, shot.pos, false);
         }
         shot.life = 0;
-        tell(mission, 'AIRFRAME HIT');
+        tell(mission, 'HULL HIT');
         continue;
       }
       // Hit friendly ally

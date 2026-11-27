@@ -14,6 +14,9 @@ import type {
 } from './types';
 import {
   add,
+  CENTRAL_REFUEL_RADIUS,
+  centralRefuelPosition,
+  clamp,
   dist3,
   forward,
   GLACIER_VAULT,
@@ -224,6 +227,7 @@ export function createMission(
     killFeed: [],
     ceilingViolationTime: 0,
     timeLimitRemaining: null,
+    refuelCooldown: 0,
     triggeredBeats: new Set(),
   };
 
@@ -351,10 +355,11 @@ export function selectRelay(mission: MissionState, id: string | undefined): void
   mission.chosenRelay = id;
 }
 
-function computeRank(elapsed: number, parTime: number, lives: number): MedalRank {
-  if (elapsed <= parTime * 0.85 && lives === 1) return 'S';
-  if (elapsed <= parTime * 1.15 && lives <= 2) return 'A';
-  if (elapsed <= parTime * 1.5) return 'B';
+export function computeRank(elapsed: number, parTime: number, hullRatio: number): MedalRank {
+  const integrity = clamp(hullRatio, 0, 1);
+  if (elapsed <= parTime * 0.85 && integrity >= 0.75) return 'S';
+  if (elapsed <= parTime * 1.15 && integrity >= 0.45) return 'A';
+  if (elapsed <= parTime * 1.5 && integrity > 0) return 'B';
   return 'C';
 }
 
@@ -413,6 +418,7 @@ export interface StepMissionEvents {
   groundKillsDelta: number;
   hitPlayer: boolean;
   ringPassed: boolean;
+  rearmed: boolean;
   phaseChanged: boolean;
 }
 
@@ -430,11 +436,12 @@ export function stepMission(
   mission.shake = Math.max(0, mission.shake - dt * 1.8);
   mission.hitMarker = Math.max(0, mission.hitMarker - dt);
   mission.damageFlash = Math.max(0, mission.damageFlash - dt);
+  mission.refuelCooldown = Math.max(0, mission.refuelCooldown - dt);
 
   if (flight.recovered) {
     mission.arms = createWeapons(flight.type);
     mission.shots = mission.shots.filter((s) => s.kind !== 'enemyMissile' || s.target !== flight);
-    tell(mission, 'REPLACEMENT AIRFRAME • Weapons restored');
+    tell(mission, 'RESPAWN COMPLETE • Systems & weapons restored');
   }
 
   // Player low-hull smoke VFX
@@ -518,9 +525,46 @@ export function stepMission(
     }
   }
 
+  const hullRatio = flight.hull / Math.max(1, flight.maxHull);
+
+  // Immediate Mission Failed transition on hull 0 / terrain impact in story, timetrial, survival
+  if (
+    (mission.mode === 'story' || mission.mode === 'timetrial' || mission.mode === 'survival') &&
+    mission.phase !== 'complete' &&
+    mission.phase !== 'failed' &&
+    (flight.hull <= 0 || flight.death > 0)
+  ) {
+    mission.phase = 'failed';
+    tell(mission, 'MISSION FAILED • Aircraft destroyed');
+  }
+
+  // Central Volcano Refuel & Rearm Station (all maps & all modes)
+  let rearmed = false;
+  if (
+    flight.death <= 0 &&
+    mission.phase !== 'complete' &&
+    mission.phase !== 'failed' &&
+    mission.refuelCooldown <= 0 &&
+    dist3(flight.pos, centralRefuelPosition(map)) <= CENTRAL_REFUEL_RADIUS
+  ) {
+    const freshArms = createWeapons(flight.type);
+    flight.fuel = flight.maxFuel;
+    flight.lowFuel = false;
+    flight.flameout = false;
+    flight.hull = flight.maxHull;
+    mission.arms.missiles = freshArms.missiles;
+    mission.arms.rockets = freshArms.rockets;
+    mission.arms.flaresLeft = freshArms.flaresLeft;
+    mission.arms.heat = 0;
+    mission.arms.overheated = false;
+    mission.refuelCooldown = 4.0;
+    rearmed = true;
+    tell(mission, 'VOLCANO CORE DEPOT • Fuel 100%, Hull repaired & Weapons rearmed!');
+  }
+
   // Ring / Rearm ring collisions
   let ringPassed = false;
-  if (flight.death <= 0 && mission.rings.length > 0) {
+  if (flight.death <= 0 && mission.rings.length > 0 && mission.phase !== 'failed') {
     if (mission.phase === 'rings') {
       const nextRing = mission.rings[mission.nextRingIndex];
       if (nextRing && !nextRing.passed && dist3(flight.pos, nextRing.pos) <= nextRing.radius) {
@@ -530,7 +574,7 @@ export function stepMission(
         tell(mission, `CHECKPOINT ${mission.nextRingIndex} / ${mission.rings.length}`);
         if (mission.nextRingIndex >= mission.rings.length) {
           mission.phase = 'complete';
-          mission.rank = computeRank(mission.time, mission.level?.parTimeSec ?? 95, flight.lives);
+          mission.rank = computeRank(mission.time, mission.level?.parTimeSec ?? 95, hullRatio);
           tell(mission, `COURSE COMPLETE • ${mission.time.toFixed(1)}s`);
         }
       }
@@ -540,16 +584,20 @@ export function stepMission(
         if (ring.isRearm && !ring.passed && dist3(flight.pos, ring.pos) <= ring.radius) {
           ring.passed = true;
           ringPassed = true;
+          rearmed = true;
           flight.hull = flight.maxHull;
+          flight.fuel = flight.maxFuel;
+          flight.lowFuel = false;
+          flight.flameout = false;
           mission.arms = createWeapons(flight.type);
-          tell(mission, 'REARM RING • Hull repaired & missiles reloaded!');
+          tell(mission, 'REARM RING • Fuel 100%, Hull repaired & missiles reloaded!');
         }
       }
     }
   }
 
   // Phase completion logic per mode
-  if (mission.mode === 'story' && mission.level) {
+  if (mission.mode === 'story' && mission.level && mission.phase !== 'failed') {
     const lvl = mission.level;
     if (lvl.archetype === 'dead-air') {
       if (mission.phase === 'combat' && mission.enemies.length === 0) {
@@ -567,7 +615,7 @@ export function stepMission(
           if (Math.hypot(delta[0], delta[2]) <= 105 && Math.abs(delta[1]) <= 155) {
             mission.signal = true;
             mission.phase = 'complete';
-            mission.rank = computeRank(mission.time, lvl.parTimeSec, flight.lives);
+            mission.rank = computeRank(mission.time, lvl.parTimeSec, hullRatio);
             tell(mission, 'SIGNAL RESTORED • ' + next.name);
           }
         }
@@ -592,7 +640,7 @@ export function stepMission(
           tell(mission, `WAVE ${mission.wave} / ${mission.maxWaves} INBOUND`);
         } else {
           mission.phase = 'complete';
-          mission.rank = computeRank(mission.time, lvl.parTimeSec, flight.lives);
+          mission.rank = computeRank(mission.time, lvl.parTimeSec, hullRatio);
           const doneBeat = lvl.script.find((b) => b.trigger === 'complete');
           tell(
             mission,
@@ -604,7 +652,7 @@ export function stepMission(
   } else if (mission.mode === 'skirmish' && mission.phase === 'combat') {
     if (mission.enemies.length === 0) {
       mission.phase = 'complete';
-      mission.rank = computeRank(mission.time, 120, flight.lives);
+      mission.rank = computeRank(mission.time, 120, hullRatio);
       tell(mission, 'SKIRMISH VICTORY • All hostiles splashed');
     }
   } else if (mission.mode === 'survival' && mission.phase === 'combat') {
@@ -623,6 +671,7 @@ export function stepMission(
     ...wEvents,
     ...sEvents,
     ringPassed,
+    rearmed,
     phaseChanged: mission.phase !== phaseBefore,
   };
 }

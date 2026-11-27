@@ -235,7 +235,7 @@ function updateShots(mission, flight, map, dt) {
         if (!flight.hull) flight.death = 1.45;
         burst(mission, shot.pos);
         shot.life = 0;
-        tell(mission, 'AIRFRAME HIT');
+        tell(mission, 'HULL HIT');
       }
       continue;
     }
@@ -263,7 +263,7 @@ export function stepMission(mission, flight, command, map, dt) {
   if (flight.recovered) {
     mission.arms = weapons();
     mission.shots = [];
-    tell(mission, 'REPLACEMENT AIRFRAME • Weapons restored');
+    tell(mission, 'RESPAWN COMPLETE • Weapons restored');
   }
   if (mission.phase === 'ambush') updateAmbush(mission, flight, dt);
   mission.target = acquire(mission.enemies, flight);

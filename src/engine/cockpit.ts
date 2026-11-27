@@ -133,14 +133,24 @@ export function drawCockpit(
     }
   }
 
-  // Diegetic Afterburner & G-Load readout (left glass)
+  // Diegetic Fuel, Burn State & G-Load readout (left glass)
+  const fuelRatio = flight.maxFuel > 0 ? Math.max(0, Math.min(1, flight.fuel / flight.maxFuel)) : 0;
+  const fuelPct = Math.round(fuelRatio * 100);
+  const fuelColor = flight.lowFuel || fuelRatio < 0.2 ? danger : fuelRatio < 0.4 ? amber : glass;
+  const burnState = flight.flameout
+    ? 'OUT'
+    : flight.boost > 0.35
+      ? 'AB'
+      : flight.fuelBurnRate < 0.65
+        ? 'IDL'
+        : 'CRZ';
+  text('FUEL', 184, 149, 7, 'right', fuelColor);
+  rect(187, 152, 4, 58, '#1a3630');
+  const fillH = Math.round(fuelRatio * 58);
+  rect(187, 210 - fillH, 4, fillH, fuelColor);
+  text(`${fuelPct}%`, 184, 212, 7, 'right', fuelColor);
   text(`G ${flight.gLoad.toFixed(1)}`, 212, 224, 8);
-  if (flight.afterburnerFuel < 0.99) {
-    text('AB', 184, 212, 7, 'right');
-    rect(187, 152, 4, 58, '#1a3630');
-    const fillH = Math.round(flight.afterburnerFuel * 58);
-    rect(187, 210 - fillH, 4, fillH, flight.afterburnerFuel < 0.25 ? danger : amber);
-  }
+  text(`${burnState} ${flight.fuelBurnRate.toFixed(1)}/S`, 212, 234, 7, 'center', fuelColor);
 
   // Pitch ladder
   ctx.save();
@@ -204,14 +214,19 @@ export function drawCockpit(
       rect(bx - 1.5, by - 1.5, 3, 3, enemy.isBoss ? amber : danger);
     }
 
-    // Warnings (STALL, GPWS PULL UP, MISSILE)
+    // Warnings (MISSILE, FLAMEOUT, STALL, PULL UP, BINGO FUEL)
     const incoming = mission.mode === 'crew' ? Boolean(mission.incoming) : missileWarning(mission, flight);
     if (incoming) {
       text('MISSILE ALERT', 320, 134, 10, 'center', danger);
+    } else if (flight.flameout) {
+      text('ENGINE FLAMEOUT', 320, 134, 10, 'center', danger);
     } else if (flight.stalling) {
       text('STALL · NOSE DOWN', 320, 134, 10, 'center', danger);
     } else if (aglClearance < 26 && flight.pitch < -0.15) {
       text('PULL UP', 320, 134, 11, 'center', danger);
+    }
+    if (flight.lowFuel && !flight.flameout) {
+      text('BINGO FUEL', 320, 146, 9, 'center', danger);
     }
   }
 

@@ -7,7 +7,7 @@ const approach = (current, target, rate, dt) => mix(current, target, 1 - Math.ex
 export function newFlight(type, position = [0, 126, -45]) {
   return {
     type, pos: [...position], yaw: 0, pitch: 0, bank: 0, roll: 0,
-    stunt: 0, speed: planes[type].speed, boost: 0, lives: 1,
+    stunt: 0, speed: planes[type].speed, boost: 0,
     death: 0, recovered: false, hull: 100,
   };
 }
@@ -19,7 +19,7 @@ export function stepFlight(flight, input, map, dt) {
     if (flight.death > 0) return;
     const position = respawnPosition(flight.pos, map);
     Object.assign(flight, newFlight(flight.type, position), {
-      yaw: flight.yaw, lives: flight.lives + 1, recovered: true,
+      yaw: flight.yaw, recovered: true,
     });
     return;
   }

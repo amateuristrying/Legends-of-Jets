@@ -40,7 +40,9 @@ test('boundary explodes at ten seconds, gives no free points, and respawns insid
   assert.match(pilot.armory.message,/COMBAT ZONE/);
   assert.deepEqual(snapshot(match,10000).score,[0,0]);
   for (let step=401;step<465;step++) tickMatch(match,step*25);
-  assert.equal(pilot.flight.lives,2);
+  assert.equal(pilot.deaths, 1);
+  assert.equal(pilot.flight.death, 0);
+  assert.equal('lives' in pilot.flight, false);
   assert.equal(pilot.flight.hull,100);
   assert.ok(Math.hypot(pilot.flight.pos[0]-ARENA_CENTER[0],pilot.flight.pos[2]-ARENA_CENTER[2])<ARENA_RADIUS);
 });

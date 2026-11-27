@@ -23,6 +23,7 @@ export interface PlaneSpec {
   turn: number;
   size: number;
   hull: number;
+  fuelCapacity: number;
   missiles: number;
   rockets: number;
   flares: number;
@@ -49,10 +50,13 @@ export interface FlightState {
   stunt: number;
   speed: number;
   boost: number;
-  afterburnerFuel: number; // 0..1 for sim-lite
+  fuel: number;
+  maxFuel: number;
+  fuelBurnRate: number;
+  lowFuel: boolean;
+  flameout: boolean;
   stalling: boolean;
   gLoad: number;
-  lives: number;
   death: number;
   recovered: boolean;
   hull: number;
@@ -257,6 +261,7 @@ export interface MissionState {
   killFeed: KillFeedItem[];
   ceilingViolationTime: number;
   timeLimitRemaining: number | null;
+  refuelCooldown: number;
   triggeredBeats: Set<string>;
   // Crew-specific overlay fields
   arena?: { center: Vec3; radius: number };

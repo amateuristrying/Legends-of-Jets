@@ -36,6 +36,7 @@ export const planes: PlaneSpec[] = [
     turn: 1.28,
     size: 0.85,
     hull: 100,
+    fuelCapacity: 240,
     missiles: 3,
     rockets: 6,
     flares: 4,
@@ -56,6 +57,7 @@ export const planes: PlaneSpec[] = [
     turn: 0.9,
     size: 1.12,
     hull: 135,
+    fuelCapacity: 300,
     missiles: 4,
     rockets: 12,
     flares: 4,
@@ -76,6 +78,7 @@ export const planes: PlaneSpec[] = [
     turn: 1.08,
     size: 1.16,
     hull: 115,
+    fuelCapacity: 340,
     missiles: 5,
     rockets: 8,
     flares: 5,
@@ -96,6 +99,7 @@ export const planes: PlaneSpec[] = [
     turn: 1.16,
     size: 1.06,
     hull: 105,
+    fuelCapacity: 280,
     missiles: 5,
     rockets: 8,
     flares: 6,
@@ -121,6 +125,7 @@ export const planes: PlaneSpec[] = [
     turn: 1.32,
     size: 1.14,
     hull: 125,
+    fuelCapacity: 320,
     missiles: 6,
     rockets: 12,
     flares: 6,
@@ -247,6 +252,12 @@ export function recordTrailSample(
 
 export const VOLCANO = { x: 0, z: 1080, radius: 360, tunnelAltitude: 137 };
 export const GLACIER_VAULT = { x: 240, z: 980, radius: 330, tunnelAltitude: 124 };
+export const CENTRAL_REFUEL_RADIUS = 54;
+
+export function centralRefuelPosition(map: number): Vec3 {
+  const landmark = map === 1 ? GLACIER_VAULT : VOLCANO;
+  return [landmark.x, landmark.tunnelAltitude, landmark.z];
+}
 
 export const TERRAIN_SIZE = 4096;
 export const TERRAIN_TEXELS = 1024;

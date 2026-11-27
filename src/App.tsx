@@ -13,6 +13,7 @@ import type {
 } from './engine/types';
 import {
   add,
+  centralRefuelPosition,
   clamp,
   forward,
   GLACIER_VAULT,
@@ -71,10 +72,12 @@ interface HudSnapshot {
   altPct: number;
   hull: number;
   maxHull: number;
-  lives: number;
   dead: boolean;
   stalling: boolean;
-  abFuel: number;
+  fuelPct: number;
+  fuelBurnRate: number;
+  lowFuel: boolean;
+  flameout: boolean;
   heat: number;
   overheated: boolean;
   missiles: number;
@@ -105,10 +108,12 @@ const INITIAL_HUD: HudSnapshot = {
   altPct: 0,
   hull: 100,
   maxHull: 100,
-  lives: 1,
   dead: false,
   stalling: false,
-  abFuel: 1,
+  fuelPct: 100,
+  fuelBurnRate: 1,
+  lowFuel: false,
+  flameout: false,
   heat: 0,
   overheated: false,
   missiles: 3,
@@ -324,8 +329,19 @@ export const App: React.FC = () => {
           ? crewLatestRef.current.pilots.find((p) => p.id === crewIdRef.current)
           : null;
 
+      const crewFuelCap = ownCrew ? (planes[ownCrew.flight.type] ?? planes[0]).fuelCapacity : 240;
       const f = ownCrew
-        ? { ...ownCrew.flight, maxHull: 100, afterburnerFuel: 1, stalling: false, gLoad: 1 }
+        ? {
+            ...ownCrew.flight,
+            maxHull: 100,
+            fuel: crewFuelCap,
+            maxFuel: crewFuelCap,
+            fuelBurnRate: 1,
+            lowFuel: false,
+            flameout: false,
+            stalling: false,
+            gLoad: 1,
+          }
         : newFlight(settingsRef.current.plane, position);
       flightRef.current = f;
       prevFlightRef.current = { ...f, pos: [...f.pos] as Vec3 };
@@ -346,6 +362,9 @@ export const App: React.FC = () => {
       simTimeRef.current = 0;
       trailRef.current = [];
       lastTrailRef.current = -1;
+      keysRef.current.clear();
+      pressedRef.current.clear();
+      rollQueuedRef.current = false;
       radarRef.current?.reset();
       lastCameraRef.current = null;
       transitionRef.current = null;
@@ -426,9 +445,37 @@ export const App: React.FC = () => {
     };
   }, [launchMode, returnToHangar, showToast]);
 
-  // Input listeners (customizable keys + mouse-aim + pointer)
+  // Input listeners (customizable keys + mouse-aim + pointer + failed debrief Space retry)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      const targetEl = e.target as HTMLElement | null;
+      const isTyping = Boolean(
+        targetEl &&
+          (targetEl.tagName === 'INPUT' ||
+            targetEl.tagName === 'TEXTAREA' ||
+            targetEl.tagName === 'SELECT' ||
+            targetEl.isContentEditable)
+      );
+      if (
+        modalRef.current === 'debrief' &&
+        missionRef.current?.phase === 'failed' &&
+        !isTyping &&
+        (e.code === 'Space' || e.key === ' ') &&
+        !e.metaKey &&
+        !e.ctrlKey &&
+        !e.altKey
+      ) {
+        e.preventDefault();
+        if (!e.repeat) {
+          const failedMission = missionRef.current;
+          launchMode(failedMission.mode, {
+            levelId: failedMission.levelId,
+            skirmish: failedMission.skirmishConfig,
+            timeTrialCourse: failedMission.timeTrialCourse,
+          });
+        }
+        return;
+      }
       if (modalRef.current || sceneStateRef.current !== 'flight' || e.metaKey || e.ctrlKey || e.altKey) return;
       const key = e.key.toLowerCase();
       if (key === 'escape') {
@@ -507,7 +554,7 @@ export const App: React.FC = () => {
       window.removeEventListener('pointermove', onPointerMove);
       window.removeEventListener('contextmenu', onContext);
     };
-  }, [cycleView]);
+  }, [cycleView, launchMode]);
 
   // Main WebGL2 + 120Hz simulation loop
   useEffect(() => {
@@ -665,7 +712,7 @@ export const App: React.FC = () => {
                   srv.pos[1] - f.pos[1],
                   srv.pos[2] - f.pos[2]
                 );
-                const respawned = f.lives !== srv.lives || (f.death > 0 && srv.death <= 0) || d > 42;
+                const respawned = Boolean(srv.recovered) || (f.death > 0 && srv.death <= 0) || d > 42;
                 if (respawned || (f.death > 0) !== (srv.death > 0)) {
                   Object.assign(f, srv);
                   prevFlightRef.current = { ...f, pos: [...f.pos] as Vec3 };
@@ -695,8 +742,15 @@ export const App: React.FC = () => {
                 .filter((p) => p.id !== crewIdRef.current && p.flight.death <= 0)
                 .map((p) => {
                   const prior = crewPrevRef.current?.pilots.find((x) => x.id === p.id);
+                  const jumpDist = prior
+                    ? Math.hypot(
+                        prior.flight.pos[0] - p.flight.pos[0],
+                        prior.flight.pos[1] - p.flight.pos[1],
+                        prior.flight.pos[2] - p.flight.pos[2]
+                      )
+                    : 999;
                   const fp =
-                    prior && prior.flight.lives === p.flight.lives && prior.flight.death <= 0
+                    prior && !p.flight.recovered && prior.flight.death <= 0 && jumpDist < 120
                       ? interpolateFlight(prior.flight, p.flight, frac)
                       : p.flight;
                   const friendly = p.team === own.team;
@@ -791,6 +845,7 @@ export const App: React.FC = () => {
                 if (ev.hitEnemy || ev.hitPlayer) aud.feedback('hit', settingsRef.current);
                 if (ev.killedEnemy) aud.feedback('kill', settingsRef.current);
                 if (ev.ringPassed) aud.feedback('ring', settingsRef.current);
+                if (ev.rearmed) aud.feedback('restored', settingsRef.current);
                 if (!warningBefore && missileWarning(m, f)) aud.feedback('incoming', settingsRef.current);
                 if (ev.phaseChanged && m.phase === 'jammed') aud.feedback('jammed', settingsRef.current);
                 if (ev.phaseChanged && m.signal) aud.feedback('restored', settingsRef.current);
@@ -835,6 +890,8 @@ export const App: React.FC = () => {
                   }
                 }
                 setModal('debrief');
+                accumulator = 0;
+                break;
               }
 
               simTimeRef.current += SIM_STEP;
@@ -922,6 +979,13 @@ export const App: React.FC = () => {
         }
         objects.push(...m.allies, ...m.enemies, ...m.shots, ...m.effects);
 
+        // 3D Central Volcano Refuel & Rearm Beacon (all maps & modes)
+        objects.push({
+          kind: 'refuel',
+          pos: centralRefuelPosition(curMap),
+          scale: 1,
+          size: 3.8,
+        });
         // 3D ground structures
         for (const gt of m.groundTargets) {
           if (!gt.destroyed) {
@@ -991,6 +1055,7 @@ export const App: React.FC = () => {
                       : 'ENDLESS / FREE FLIGHT';
 
           const secs = Math.ceil(m.remaining ?? 0);
+          const fuelRatio = f.maxFuel > 0 ? clamp(f.fuel / f.maxFuel, 0, 1) : 0;
           setHud({
             speed: Math.round(f.speed * 3.6),
             altitude: Math.round(f.pos[1]),
@@ -999,10 +1064,12 @@ export const App: React.FC = () => {
             altPct: clamp((f.pos[1] / 920) * 100, 0, 100),
             hull: Math.round(f.hull),
             maxHull: f.maxHull,
-            lives: f.lives,
             dead: f.death > 0,
             stalling: f.stalling,
-            abFuel: f.afterburnerFuel,
+            fuelPct: Math.round(fuelRatio * 100),
+            fuelBurnRate: f.fuelBurnRate,
+            lowFuel: f.lowFuel,
+            flameout: f.flameout,
             heat: m.arms.heat,
             overheated: m.arms.overheated,
             missiles: m.arms.missiles,
@@ -1360,14 +1427,17 @@ export const App: React.FC = () => {
                 {Math.round((hud.hull / Math.max(1, hud.maxHull)) * 100)}%
               </b>
             </span>
-            <span>
-              AIRFRAME <b>{hud.lives}</b>
-            </span>
-            {settings.flightModel === 'sim-lite' && (
-              <span>
-                AB <b>{Math.round(hud.abFuel * 100)}%</b>
+            <span
+              className={`fuel-stat ${
+                hud.lowFuel ? 'fuel-bingo' : hud.fuelPct < 40 ? 'fuel-warn' : 'fuel-ok'
+              }`}
+            >
+              FUEL
+              <span className="fuel-bar" aria-label={`Fuel ${hud.fuelPct}%`}>
+                <i className="fuel-fill" style={{ width: `${hud.fuelPct}%` }} />
               </span>
-            )}
+              <b>{hud.fuelPct}%</b>
+            </span>
           </div>
 
           <div id="arsenal" className={hud.overheated ? 'overheated' : ''}>
@@ -1405,15 +1475,26 @@ export const App: React.FC = () => {
             </div>
           )}
 
+          {(hud.flameout || hud.lowFuel) && !hud.dead && !hud.missileAlert && !hud.stalling && (
+            <div id="missile-warning" role="alert">
+              {hud.flameout ? 'ENGINE FLAMEOUT' : 'BINGO FUEL'}
+              <span>
+                {hud.flameout
+                  ? 'NO THRUST · GLIDE TO VOLCANO CORE DEPOT TO REFUEL'
+                  : 'FUEL BELOW 20% · FLY THROUGH CENTRAL VOLCANO DEPOT'}
+              </span>
+            </div>
+          )}
+
           <div id="flight-help">
             WASD fly · Shift boost · B brake · Space view · G/LMB gun · M missile · X/RMB rocket · F flare · R map
           </div>
 
           {hud.dead && (
             <div id="respawn">
-              <span>A NEW FLIGHT BEGINS</span>
+              <span>RELAUNCHING</span>
               <strong>Back in the sky.</strong>
-              <p>Replacement aircraft arriving above your last coordinates.</p>
+              <p>Stabilizing aircraft above your last coordinates.</p>
             </div>
           )}
 
@@ -1753,8 +1834,13 @@ export const App: React.FC = () => {
             <p>
               Time: <strong>{missionRef.current.time.toFixed(1)}s</strong> · Air Kills:{' '}
               <strong>{missionRef.current.kills}</strong> · Ground Targets:{' '}
-              <strong>{missionRef.current.groundKills}</strong> · Airframes Used:{' '}
-              <strong>{flightRef.current.lives}</strong>
+              <strong>{missionRef.current.groundKills}</strong> · Hull Integrity:{' '}
+              <strong>
+                {Math.round(
+                  (flightRef.current.hull / Math.max(1, flightRef.current.maxHull)) * 100
+                )}
+                %
+              </strong>
             </p>
             <div className="btn-row">
               {missionRef.current.mode === 'story' &&
@@ -1771,7 +1857,7 @@ export const App: React.FC = () => {
                   </button>
                 )}
               <button
-                className="secondary"
+                className={missionRef.current.phase === 'failed' ? 'primary' : 'secondary'}
                 onClick={() =>
                   launchMode(missionRef.current!.mode, {
                     levelId: missionRef.current?.levelId,
@@ -1780,7 +1866,13 @@ export const App: React.FC = () => {
                   })
                 }
               >
-                Replay Sortie
+                {missionRef.current.phase === 'failed' ? (
+                  <>
+                    Retry Sortie <kbd>SPACE</kbd>
+                  </>
+                ) : (
+                  'Replay Sortie'
+                )}
               </button>
               <button className="secondary" onClick={() => returnToHangar()}>
                 Return to Hangar

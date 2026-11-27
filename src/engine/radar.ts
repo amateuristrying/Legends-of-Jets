@@ -2,6 +2,7 @@ import type { FlightState, MissionState, Vec3 } from './types';
 import type { CameraState } from './renderer';
 import {
   add,
+  centralRefuelPosition,
   clamp,
   dist3,
   dot,
@@ -158,6 +159,23 @@ export class Radar {
         ctx.fillRect(exitX - 2, exitY - 2, 4, 4);
       }
     }
+
+    // Central Volcano Refuel & Rearm Station diamond icon
+    const refuelPos = centralRefuelPosition(map);
+    const [rfX, rfY] = screen(refuelPos);
+    ctx.save();
+    ctx.fillStyle = flight.lowFuel ? '#ff7b66' : '#45ffd2';
+    ctx.strokeStyle = '#e8fff9';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(rfX, rfY - 5);
+    ctx.lineTo(rfX + 5, rfY);
+    ctx.lineTo(rfX, rfY + 5);
+    ctx.lineTo(rfX - 5, rfY);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
 
     // Ground targets
     for (const gt of mission.groundTargets) {
@@ -463,6 +481,30 @@ export function drawCombatHud(
     } else {
       drawEdgeArrow(ctx, activeRing.pos, camera, width, height, col, activeRing.isRearm ? 'REARM' : 'RING');
     }
+  }
+
+  // Central Volcano Refuel & Rearm 3D diamond icon
+  const depotPos = centralRefuelPosition(map);
+  const depotDist = Math.round(dist3(flight.pos, depotPos));
+  const depotPt = project(depotPos, camera, width, height);
+  if (depotPt) {
+    const dx = clamp(depotPt[0], 22, width - 24);
+    const dy = clamp(depotPt[1], 22, height - 24);
+    const depotColor = flight.lowFuel || flight.flameout ? '#58ffd7' : '#45ffd2bb';
+    ctx.strokeStyle = depotColor;
+    ctx.fillStyle = depotColor;
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    ctx.moveTo(dx, dy - 7);
+    ctx.lineTo(dx + 7, dy);
+    ctx.lineTo(dx, dy + 7);
+    ctx.lineTo(dx - 7, dy);
+    ctx.closePath();
+    ctx.stroke();
+    ctx.font = 'bold 9px monospace';
+    ctx.fillText(`REFUEL · ${depotDist}M`, Math.min(dx + 10, width - 86), dy + 3);
+  } else if (flight.lowFuel || flight.flameout) {
+    drawEdgeArrow(ctx, depotPos, camera, width, height, '#45ffd2', 'REFUEL');
   }
 
   // Relay objective diamond

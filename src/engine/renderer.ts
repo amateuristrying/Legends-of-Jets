@@ -454,8 +454,28 @@ export function aircraftPoints(type: number): Float32Array {
   return new Float32Array(points);
 }
 
-function buildStructurePoints(kind: 'radar' | 'aa' | 'relay' | 'core' | 'ring' | 'rearm'): Float32Array {
+function buildStructurePoints(kind: 'radar' | 'aa' | 'relay' | 'core' | 'ring' | 'rearm' | 'refuel'): Float32Array {
   const pts: number[] = [];
+  if (kind === 'refuel') {
+    // Central Volcano Refuel & Rearm Depot: glowing teal horizontal ring + vertical diamond core
+    const segs = 36;
+    for (let i = 0; i < segs; i++) {
+      const a = (i / segs) * Math.PI * 2;
+      pts.push(Math.cos(a) * 26, 0, Math.sin(a) * 26, 0.2, 1.0, 0.84);
+      if (i % 3 === 0) {
+        pts.push(Math.cos(a) * 30, 0, Math.sin(a) * 30, 0.9, 1.0, 0.96);
+      }
+    }
+    for (let y = -16; y <= 16; y += 2.5) {
+      const r = Math.max(0.8, 7 - Math.abs(y) * 0.42);
+      for (let i = 0; i < 8; i++) {
+        const a = (i / 8) * Math.PI * 2;
+        pts.push(Math.cos(a) * r, y, Math.sin(a) * r, 0.35, 1.0, 0.78);
+      }
+    }
+    pts.push(0, 20, 0, 1, 1, 1, 0, -20, 0, 1, 1, 1);
+    return new Float32Array(pts);
+  }
   if (kind === 'ring' || kind === 'rearm') {
     const col: Vec3 = kind === 'rearm' ? [0.22, 1.0, 0.62] : [1.0, 0.82, 0.24];
     const segs = 36;
@@ -659,6 +679,7 @@ export class Renderer {
       ['core', this.buffer(buildStructurePoints('core'))],
       ['ring', this.buffer(buildStructurePoints('ring'))],
       ['rearm', this.buffer(buildStructurePoints('rearm'))],
+      ['refuel', this.buffer(buildStructurePoints('refuel'))],
     ]);
 
     this.effects = new Map(

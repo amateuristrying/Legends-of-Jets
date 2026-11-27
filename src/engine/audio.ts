@@ -13,7 +13,8 @@ export type SoundCue =
   | 'restored'
   | 'incoming'
   | 'boom'
-  | 'pullup';
+  | 'pullup'
+  | 'bingo';
 
 export class TacticalAudio {
   context: AudioContext;
@@ -31,6 +32,7 @@ export class TacticalAudio {
   jammed = false;
   lastBoost = 0;
   lastPullup = 0;
+  lastBingo = 0;
 
   constructor() {
     const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
@@ -138,6 +140,7 @@ export class TacticalAudio {
       incoming: [690, 0.35, 0.2, 'triangle'],
       boom: [72, 0.34, 0.34, 'noise'],
       pullup: [980, 0.26, 0.22, 'square'],
+      bingo: [540, 0.24, 0.2, 'square'],
     };
 
     const [frequency, duration, volume, type] = cues[kind];
@@ -193,7 +196,7 @@ export class TacticalAudio {
     const active = playing && Boolean(flight) && settings.sound && (flight?.death ?? 1) <= 0;
 
     // Afterburner sonic boom thump on boost engage
-    if (active && flight && flight.boost > 0.55 && this.lastBoost <= 0.55) {
+    if (active && flight && !flight.flameout && flight.boost > 0.55 && this.lastBoost <= 0.55) {
       this.feedback('boom', settings);
     }
     this.lastBoost = flight?.boost ?? 0;
@@ -204,19 +207,32 @@ export class TacticalAudio {
       this.feedback('pullup', settings);
     }
 
+    // Bingo / Low-Fuel caution tone (<20% fuel)
+    if (active && flight && flight.lowFuel && now - this.lastBingo > 3.2) {
+      this.lastBingo = now;
+      this.feedback('bingo', settings);
+    }
+
+    const engineRunning = active && Boolean(flight) && !flight?.flameout;
     this.level.gain.setTargetAtTime(
-      active && flight ? settings.volume * (0.3 + flight.boost * 0.36) : 0,
+      active && flight
+        ? settings.volume * (flight.flameout ? 0.08 : 0.3 + flight.boost * 0.36)
+        : 0,
       now,
       0.14
     );
-    this.filter.frequency.setTargetAtTime(250 + (flight?.speed || 0) * 5.2, now, 0.18);
+    this.filter.frequency.setTargetAtTime(
+      flight?.flameout ? 170 : 250 + (flight?.speed || 0) * 5.2,
+      now,
+      0.18
+    );
 
     this.turbineOsc.frequency.setTargetAtTime(
       (115 + (flight?.speed || 90) * 1.35) * spec.enginePitch,
       now,
       0.12
     );
-    this.turbineGain.gain.setTargetAtTime(active ? settings.volume * 0.06 : 0, now, 0.15);
+    this.turbineGain.gain.setTargetAtTime(engineRunning ? settings.volume * 0.06 : 0, now, 0.15);
 
     // Classic IR seeker growl when target locked
     this.seekerOsc.frequency.setTargetAtTime(opts.hasLock ? 840 : 280, now, 0.05);
