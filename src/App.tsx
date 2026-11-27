@@ -23,6 +23,7 @@ import {
   planes,
   pruneTrail,
   recordTrailSample,
+  resetTerrainDamage,
   scale,
   solidAt,
   VOLCANO,
@@ -312,6 +313,7 @@ export const App: React.FC = () => {
                     : settingsRef.current.map;
 
       rendererRef.current.prepare(map);
+      resetTerrainDamage();
 
       let position: Vec3;
       if (mode === 'story' && lvl) {
@@ -385,6 +387,7 @@ export const App: React.FC = () => {
   const returnToHangar = useCallback((keepLobby = false) => {
     trailRef.current = [];
     lastTrailRef.current = -1;
+    resetTerrainDamage();
     setScene('hangar');
     if (!keepLobby) crewRef.current?.disconnect();
     setModal(null);
@@ -986,11 +989,13 @@ export const App: React.FC = () => {
           scale: 1,
           size: 3.8,
         });
-        // 3D ground structures
+        // 3D ground structures (intact or smoking/charred ruins)
         for (const gt of m.groundTargets) {
-          if (!gt.destroyed) {
-            objects.push({ kind: gt.kind, pos: gt.pos, size: 3.6 });
-          }
+          objects.push({
+            kind: gt.destroyed ? `${gt.kind}_ruin` : gt.kind,
+            pos: gt.pos,
+            size: gt.destroyed ? 3.2 : 3.6,
+          });
         }
         // 3D glowing rings
         for (const ring of m.rings) {

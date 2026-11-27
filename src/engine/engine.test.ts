@@ -2,14 +2,21 @@ import { describe, expect, it } from 'vitest';
 import {
   AIRCRAFT_WING_GEOMETRY,
   aircraftBasis,
+  applyTerrainImpact,
+  carveLandmark,
   centralRefuelPosition,
+  consumeTerrainDirty,
   ELEVATION_STEP,
   GLACIER_VAULT,
   glacierDensity,
+  getTerrainRevision,
   planes,
   pruneTrail,
   recordTrailSample,
+  resetTerrainDamage,
+  sampleElevationRGWindow,
   sampleElevationWindow,
+  scorchAt,
   solidAt,
   TERRAIN_SIZE,
   terrainHeight,
@@ -20,6 +27,7 @@ import {
   WINGTIP_OFFSETS,
   wingtipPositions,
 } from './world';
+import { getLandmarkChunks } from './landmarks';
 import { interpolateFlight, newFlight, SIM_STEP, stepFlight } from './flight';
 import { CAMPAIGN_LEVELS, RELAYS, relayPosition } from './campaign';
 import {
@@ -30,9 +38,10 @@ import {
   selectRelay,
   stepMission,
 } from './modes';
+import { updateShots } from './combat';
 import { Radar } from './radar';
 import { isPlaneUnlocked, DEFAULT_PILOT_LOG } from './storage';
-import type { ControlInput, TrailSample } from './types';
+import type { ControlInput, GroundTarget, TrailSample } from './types';
 
 const IDLE: ControlInput = {
   turn: 0,
@@ -471,5 +480,223 @@ describe('Legends of Jets v1.0 Engine', () => {
       const pos = relayPosition(relay, 0);
       expect(solidAt(pos[0], pos[1], pos[2], 0, 5), `Relay ${relay.id}`).toBe(false);
     }
+  });
+
+  it('deforms terrain with weapon-scaled craters (tracer < rocket < missile), updates RG8/Radar, and resets cleanly', () => {
+    resetTerrainDamage();
+
+    // Find a high-elevation land coordinate on Map 0 (Ember Canyon)
+    let landX = 960;
+    let landZ = 960;
+    for (let x = 640; x <= 1600; x += 32) {
+      if (terrainHeight(x, 960, 0) > 65) {
+        landX = x;
+        break;
+      }
+    }
+    const baseH = terrainHeight(landX, landZ, 0);
+    expect(baseH).toBeGreaterThan(60);
+
+    // 1) Cannon (tracer): small ~4m radius, ~0.8m chip
+    const revBefore = getTerrainRevision(0);
+    const flight = newFlight(0, [landX, baseH + 120, landZ]);
+    const mission = createMission('endless', flight, { map: 0 });
+    mission.shots.push({
+      kind: 'tracer',
+      pos: [landX, baseH + 2, landZ],
+      velocity: [0, -600, 0],
+      life: 0.5,
+      size: 2.8,
+      damage: 28,
+      ownerName: 'YOU',
+    });
+    updateShots(mission, flight, 0, SIM_STEP);
+    const tracerDrop = baseH - terrainHeight(landX, landZ, 0);
+    expect(tracerDrop).toBeGreaterThan(0.3);
+    expect(tracerDrop).toBeLessThan(2.0);
+    expect(scorchAt(landX, landZ, 0)).toBeGreaterThan(0.2);
+    expect(getTerrainRevision(0)).toBeGreaterThan(revBefore);
+
+    // 2) Rocket: medium ~18m radius, ~10m depth crater
+    const rocketX = landX + 128;
+    const rocketBase = terrainHeight(rocketX, landZ, 0);
+    expect(rocketBase).toBeGreaterThan(40);
+    mission.shots.push({
+      kind: 'rocket',
+      pos: [rocketX, rocketBase + 2, landZ],
+      velocity: [0, -520, 0],
+      life: 0.5,
+      size: 4.4,
+      damage: 95,
+      ownerName: 'YOU',
+    });
+    updateShots(mission, flight, 0, SIM_STEP);
+    const rocketDrop = rocketBase - terrainHeight(rocketX, landZ, 0);
+    expect(rocketDrop).toBeGreaterThan(7);
+    expect(rocketDrop).toBeLessThan(12);
+    expect(solidAt(rocketX, rocketBase - 2, landZ, 0)).toBe(false);
+
+    // 3) Missile: heavy ~34m radius, ~22m depth crater + dirty bounds + RG8 channels
+    const missileX = landX + 256;
+    const missileBase = terrainHeight(missileX, landZ, 0);
+    expect(missileBase).toBeGreaterThan(40);
+    mission.shots.push({
+      kind: 'missile',
+      pos: [missileX, missileBase + 2, landZ],
+      velocity: [0, -355, 0],
+      life: 0.5,
+      size: 5.2,
+      damage: 110,
+      ownerName: 'YOU',
+    });
+    updateShots(mission, flight, 0, SIM_STEP);
+    const missileDrop = missileBase - terrainHeight(missileX, landZ, 0);
+    expect(missileDrop).toBeGreaterThan(rocketDrop + 6);
+    expect(missileDrop).toBeLessThanOrEqual(22.5);
+    expect(solidAt(missileX, missileBase - 8, landZ, 0)).toBe(false);
+
+    const dirty = consumeTerrainDirty(0);
+    expect(dirty.bounds).not.toBeNull();
+    expect(dirty.bounds!.minX).toBeLessThanOrEqual(landX);
+    expect(dirty.bounds!.maxX).toBeGreaterThanOrEqual(missileX);
+
+    const rg = sampleElevationRGWindow(0, missileX - 64, landZ - 64, 16, ELEVATION_STEP);
+    const centerIdx = (8 * 16 + 8) * 2;
+    expect(rg[centerIdx + 1]).toBeGreaterThan(200); // G channel scorch intensity
+
+    // Radar terrain cache invalidates when terrain deforms
+    const prevDoc = globalThis.document;
+    let tileWrites = 0;
+    const makeCtx = () => ({
+      imageSmoothingEnabled: true,
+      lineWidth: 1,
+      strokeStyle: '',
+      fillStyle: '',
+      font: '',
+      createImageData: (w: number, h: number) => ({ width: w, height: h, data: new Uint8ClampedArray(w * h * 4) }),
+      putImageData: () => {
+        tileWrites++;
+      },
+      clearRect: () => {},
+      save: () => {},
+      restore: () => {},
+      beginPath: () => {},
+      arc: () => {},
+      clip: () => {},
+      drawImage: () => {},
+      stroke: () => {},
+      moveTo: () => {},
+      lineTo: () => {},
+      fillText: () => {},
+      setLineDash: () => {},
+      fillRect: () => {},
+      translate: () => {},
+      rotate: () => {},
+      closePath: () => {},
+      fill: () => {},
+    });
+    (globalThis as unknown as { document: unknown }).document = {
+      createElement: () => ({ width: 48, height: 48, getContext: makeCtx }),
+    };
+    try {
+      const radar = new Radar({
+        getContext: makeCtx,
+        getBoundingClientRect: () => ({ left: 0, top: 0, width: 192, height: 192 }),
+      } as unknown as HTMLCanvasElement);
+      radar.draw(flight, mission, 0);
+      expect(tileWrites).toBe(1);
+      applyTerrainImpact(landX, landZ, 24, 14, 0.9, 0);
+      radar.draw(flight, mission, 0);
+      expect(tileWrites).toBe(2);
+    } finally {
+      (globalThis as unknown as { document: unknown }).document = prevDoc;
+    }
+
+    // Reset restores pristine height and clears scorch
+    resetTerrainDamage(0);
+    expect(terrainHeight(landX, landZ, 0)).toBeCloseTo(baseH, 4);
+    expect(terrainHeight(missileX, landZ, 0)).toBeCloseTo(missileBase, 4);
+    expect(scorchAt(missileX, landZ, 0)).toBe(0);
+  });
+
+  it('carves localized pockets into [0, 0] volcano walls and resets cleanly', () => {
+    resetTerrainDamage();
+    const initialChunks = getLandmarkChunks(0);
+    expect(initialChunks.length).toBeGreaterThan(10);
+
+    // Find a solid wall surface cell on the Ashmouth Caldera inner crater wall (diagonal off-tunnel)
+    let wallX = 115;
+    const wallY = 140;
+    let wallZ = 115;
+    for (let d = 95; d <= 180; d += 2) {
+      if (solidAt(d, wallY, d, 0)) {
+        wallX = d;
+        wallZ = d;
+        break;
+      }
+    }
+    expect(solidAt(wallX, wallY, wallZ, 0)).toBe(true);
+
+    // Carve with heavy missile blast
+    const carved = carveLandmark(wallX, wallY, wallZ, 22, 1.0, 0);
+    expect(carved).toBe(true);
+    expect(solidAt(wallX, wallY, wallZ, 0)).toBe(false);
+
+    // Only intersecting landmark chunks bump version
+    const updatedChunks = getLandmarkChunks(0);
+    const bumped = updatedChunks.filter((c) => c.version > 1);
+    expect(bumped.length).toBeGreaterThan(0);
+    expect(bumped.length).toBeLessThan(updatedChunks.length);
+
+    // Reset restores solid volcano wall
+    resetTerrainDamage(0);
+    expect(solidAt(wallX, wallY, wallZ, 0)).toBe(true);
+  });
+
+  it('leaves destroyed ground targets (radar, aa, relay, core) in ruin state emitting smoke', () => {
+    resetTerrainDamage();
+    const flight = newFlight(0, [800, 300, 800]);
+    const mission = createMission('endless', flight, { map: 0 });
+    const kinds: GroundTarget['kind'][] = ['radar', 'aa', 'relay', 'core'];
+    mission.groundTargets = kinds.map((kind, idx) => {
+      const gx = 800 + idx * 120;
+      const gz = 800;
+      return {
+        id: `test-${kind}`,
+        name: `Test ${kind}`,
+        kind,
+        pos: [gx, terrainHeight(gx, gz, 0) + 12, gz],
+        hp: 40,
+        maxHp: 40,
+        fireCooldown: 3,
+        destroyed: false,
+      };
+    });
+
+    // Destroy all 4 ground target types with rockets
+    for (const gt of mission.groundTargets) {
+      mission.shots.push({
+        kind: 'rocket',
+        pos: [gt.pos[0], gt.pos[1], gt.pos[2]],
+        velocity: [0, -10, 0],
+        life: 0.5,
+        size: 4.4,
+        damage: 95,
+        ownerName: 'YOU',
+      });
+    }
+    const res = updateShots(mission, flight, 0, SIM_STEP);
+    expect(res.groundKillsDelta).toBe(4);
+    for (const gt of mission.groundTargets) {
+      expect(gt.destroyed).toBe(true);
+    }
+
+    // Clear initial explosion burst and verify ongoing ruin smoke emission
+    mission.effects = [];
+    for (let i = 0; i < 20; i++) {
+      stepMission(mission, flight, IDLE, 0, SIM_STEP);
+    }
+    expect(mission.effects.some((e) => e.kind === 'smoke')).toBe(true);
+    resetTerrainDamage();
   });
 });

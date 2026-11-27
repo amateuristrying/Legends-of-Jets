@@ -267,11 +267,45 @@ export const ELEVATION_SPAN = 8192;
 export const ELEVATION_TEXELS = 1024;
 export const ELEVATION_STEP = ELEVATION_SPAN / ELEVATION_TEXELS;
 
+export interface DirtyBounds {
+  minX: number;
+  minZ: number;
+  maxX: number;
+  maxZ: number;
+}
+
+export interface DirtyLandmarkBox {
+  minX: number;
+  minY: number;
+  minZ: number;
+  maxX: number;
+  maxY: number;
+  maxZ: number;
+}
+
+interface LandmarkCarve {
+  x: number;
+  y: number;
+  z: number;
+  radius: number;
+  scorch: number;
+}
+
 const CHUNK_CELLS = 16;
 const CHUNK_SIZE = CHUNK_CELLS * TERRAIN_GRID;
 const MAX_CACHED_CHUNKS = 6000;
 const chunkCaches: Array<Map<string, Uint8Array>> = [new Map(), new Map()];
+const deformCaches: Array<Map<string, Float32Array>> = [new Map(), new Map()];
+const scorchCaches: Array<Map<string, Uint8Array>> = [new Map(), new Map()];
 const tiles: Array<Uint8Array | undefined> = [];
+const terrainRevisions = [0, 0];
+const terrainFullDirty = [false, false];
+const dirtyTerrainBounds: Array<DirtyBounds | null> = [null, null];
+
+const landmarkCarves: Array<LandmarkCarve[]> = [[], []];
+const landmarkRevisions = [0, 0];
+const landmarkFullDirty = [false, false];
+const dirtyLandmarkBoxes: Array<DirtyLandmarkBox[]> = [[], []];
 
 const smooth = (t: number): number => t * t * (3 - 2 * t);
 const fade = (t: number): number => t * t * t * (t * (t * 6 - 15) + 10);
@@ -409,8 +443,13 @@ function mountain(x: number, z: number, map: number): number {
   return mix(24, baseIce, gSurround * (1 - gApproach));
 }
 
+function mapIndex(map: number): number {
+  return map === 1 ? 1 : 0;
+}
+
 function getTerrainChunk(map: number, cx: number, cz: number): Uint8Array {
-  const cache = chunkCaches[map] ?? chunkCaches[0];
+  const m = mapIndex(map);
+  const cache = chunkCaches[m];
   const key = `${cx},${cz}`;
   const cached = cache.get(key);
   if (cached) {
@@ -427,7 +466,7 @@ function getTerrainChunk(map: number, cx: number, cz: number): Uint8Array {
     for (let lx = 0; lx < CHUNK_CELLS; lx++) {
       const wx = baseX + lx * TERRAIN_GRID;
       chunk[rowOff + lx] = Math.round(
-        (clamp(mountain(wx, wz, map), 0, TERRAIN_HEIGHT) * 255) / TERRAIN_HEIGHT
+        (clamp(mountain(wx, wz, m), 0, TERRAIN_HEIGHT) * 255) / TERRAIN_HEIGHT
       );
     }
   }
@@ -439,6 +478,185 @@ function getTerrainChunk(map: number, cx: number, cz: number): Uint8Array {
   return chunk;
 }
 
+function getOrCreateDeformChunk(m: number, key: string): Float32Array {
+  let chunk = deformCaches[m].get(key);
+  if (!chunk) {
+    chunk = new Float32Array(CHUNK_CELLS * CHUNK_CELLS);
+    deformCaches[m].set(key, chunk);
+  }
+  return chunk;
+}
+
+function getOrCreateScorchChunk(m: number, key: string): Uint8Array {
+  let chunk = scorchCaches[m].get(key);
+  if (!chunk) {
+    chunk = new Uint8Array(CHUNK_CELLS * CHUNK_CELLS);
+    scorchCaches[m].set(key, chunk);
+  }
+  return chunk;
+}
+
+function cellCoords(wx: number, wz: number): { cx: number; cz: number; idx: number } {
+  const gx = Math.round(wx / TERRAIN_GRID);
+  const gz = Math.round(wz / TERRAIN_GRID);
+  const cx = Math.floor(gx / CHUNK_CELLS);
+  const cz = Math.floor(gz / CHUNK_CELLS);
+  const lx = gx - cx * CHUNK_CELLS;
+  const lz = gz - cz * CHUNK_CELLS;
+  return { cx, cz, idx: lz * CHUNK_CELLS + lx };
+}
+
+function liveElevationByte(m: number, wx: number, wz: number): number {
+  const { cx, cz, idx } = cellCoords(wx, wz);
+  const key = `${cx},${cz}`;
+  const baseByte = getTerrainChunk(m, cx, cz)[idx];
+  const deformChunk = deformCaches[m].get(key);
+  if (!deformChunk) return baseByte;
+  const deform = deformChunk[idx];
+  if (deform <= 0) return baseByte;
+  const rawH = (baseByte * TERRAIN_HEIGHT) / 255;
+  const baseH = Math.max(10, Math.floor(rawH / 4) * 4);
+  const effectiveH = Math.max(10, baseH - deform);
+  return Math.round((clamp(effectiveH, 0, TERRAIN_HEIGHT) * 255) / TERRAIN_HEIGHT);
+}
+
+function liveScorchByte(m: number, wx: number, wz: number): number {
+  const { cx, cz, idx } = cellCoords(wx, wz);
+  const scorchChunk = scorchCaches[m].get(`${cx},${cz}`);
+  return scorchChunk ? scorchChunk[idx] : 0;
+}
+
+export function getTerrainRevision(map: number): number {
+  return terrainRevisions[mapIndex(map)];
+}
+
+export function consumeTerrainDirty(map: number): { full: boolean; bounds: DirtyBounds | null } {
+  const m = mapIndex(map);
+  const full = terrainFullDirty[m];
+  const bounds = dirtyTerrainBounds[m];
+  terrainFullDirty[m] = false;
+  dirtyTerrainBounds[m] = null;
+  return { full, bounds };
+}
+
+export function getLandmarkRevision(map: number): number {
+  return landmarkRevisions[mapIndex(map)];
+}
+
+export function consumeLandmarkDirty(map: number): { full: boolean; boxes: DirtyLandmarkBox[] } {
+  const m = mapIndex(map);
+  const full = landmarkFullDirty[m];
+  const boxes = dirtyLandmarkBoxes[m];
+  landmarkFullDirty[m] = false;
+  dirtyLandmarkBoxes[m] = [];
+  return { full, boxes };
+}
+
+export function applyTerrainImpact(
+  x: number,
+  z: number,
+  radius: number,
+  depth: number,
+  scorch: number,
+  map: number
+): boolean {
+  if (radius <= 0 || (depth <= 0 && scorch <= 0)) return false;
+  const m = mapIndex(map);
+  const minGx = Math.floor((x - radius) / TERRAIN_GRID);
+  const maxGx = Math.ceil((x + radius) / TERRAIN_GRID);
+  const minGz = Math.floor((z - radius) / TERRAIN_GRID);
+  const maxGz = Math.ceil((z + radius) / TERRAIN_GRID);
+
+  let changed = false;
+  for (let gz = minGz; gz <= maxGz; gz++) {
+    const wz = gz * TERRAIN_GRID;
+    const dz = wz - z;
+    const cz = Math.floor(gz / CHUNK_CELLS);
+    const lz = gz - cz * CHUNK_CELLS;
+    for (let gx = minGx; gx <= maxGx; gx++) {
+      const wx = gx * TERRAIN_GRID;
+      const dist = Math.hypot(wx - x, dz);
+      if (dist > radius) continue;
+
+      const t = dist / radius;
+      const depthFalloff = smooth(clamp(1 - t, 0, 1));
+      const scorchFalloff = smooth(clamp(1 - t * 0.92, 0, 1));
+
+      const cx = Math.floor(gx / CHUNK_CELLS);
+      const lx = gx - cx * CHUNK_CELLS;
+      const key = `${cx},${cz}`;
+      const idx = lz * CHUNK_CELLS + lx;
+
+      if (depth > 0) {
+        const baseChunk = getTerrainChunk(m, cx, cz);
+        const rawH = (baseChunk[idx] * TERRAIN_HEIGHT) / 255;
+        const baseH = Math.max(10, Math.floor(rawH / 4) * 4);
+        const maxCarve = Math.max(0, baseH - 10);
+        if (maxCarve > 0) {
+          const deformChunk = getOrCreateDeformChunk(m, key);
+          const nextDeform = Math.min(maxCarve, deformChunk[idx] + depth * depthFalloff);
+          if (nextDeform > deformChunk[idx]) {
+            deformChunk[idx] = nextDeform;
+            changed = true;
+          }
+        }
+      }
+
+      if (scorch > 0) {
+        const scorchByte = Math.round(clamp(scorch * scorchFalloff, 0, 1) * 255);
+        if (scorchByte > 0) {
+          const scorchChunk = getOrCreateScorchChunk(m, key);
+          if (scorchByte > scorchChunk[idx]) {
+            scorchChunk[idx] = scorchByte;
+            changed = true;
+          }
+        }
+      }
+    }
+  }
+
+  if (changed) {
+    tiles[m] = undefined;
+    terrainRevisions[m]++;
+    const pad = TERRAIN_GRID;
+    const minX = minGx * TERRAIN_GRID - pad;
+    const minZ = minGz * TERRAIN_GRID - pad;
+    const maxX = maxGx * TERRAIN_GRID + pad;
+    const maxZ = maxGz * TERRAIN_GRID + pad;
+    const prev = dirtyTerrainBounds[m];
+    if (prev) {
+      prev.minX = Math.min(prev.minX, minX);
+      prev.minZ = Math.min(prev.minZ, minZ);
+      prev.maxX = Math.max(prev.maxX, maxX);
+      prev.maxZ = Math.max(prev.maxZ, maxZ);
+    } else {
+      dirtyTerrainBounds[m] = { minX, minZ, maxX, maxZ };
+    }
+  }
+  return changed;
+}
+
+export function resetTerrainDamage(map?: number): void {
+  const targets = map === undefined ? [0, 1] : [mapIndex(map)];
+  for (const m of targets) {
+    deformCaches[m].clear();
+    scorchCaches[m].clear();
+    tiles[m] = undefined;
+    dirtyTerrainBounds[m] = null;
+    terrainFullDirty[m] = true;
+    terrainRevisions[m]++;
+
+    landmarkCarves[m] = [];
+    dirtyLandmarkBoxes[m] = [];
+    landmarkFullDirty[m] = true;
+    landmarkRevisions[m]++;
+  }
+}
+
+export function scorchAt(x: number, z: number, map: number): number {
+  return liveScorchByte(mapIndex(map), x, z) / 255;
+}
+
 export function sampleElevationWindow(
   map: number,
   originX: number,
@@ -447,21 +665,44 @@ export function sampleElevationWindow(
   step = ELEVATION_STEP,
   out?: Uint8Array
 ): Uint8Array {
+  const m = mapIndex(map);
   const buf = out && out.length === texels * texels ? out : new Uint8Array(texels * texels);
-  if (step === TERRAIN_GRID && originX % CHUNK_SIZE === 0 && originZ % CHUNK_SIZE === 0 && texels % CHUNK_CELLS === 0) {
+  if (
+    step === TERRAIN_GRID &&
+    originX % CHUNK_SIZE === 0 &&
+    originZ % CHUNK_SIZE === 0 &&
+    texels % CHUNK_CELLS === 0
+  ) {
     const chunksPerSide = texels / CHUNK_CELLS;
     const startCx = originX / CHUNK_SIZE;
     const startCz = originZ / CHUNK_SIZE;
     for (let czOff = 0; czOff < chunksPerSide; czOff++) {
       const baseRow = czOff * CHUNK_CELLS;
       for (let cxOff = 0; cxOff < chunksPerSide; cxOff++) {
-        const chunk = getTerrainChunk(map, startCx + cxOff, startCz + czOff);
+        const cx = startCx + cxOff;
+        const cz = startCz + czOff;
+        const baseChunk = getTerrainChunk(m, cx, cz);
+        const deformChunk = deformCaches[m].get(`${cx},${cz}`);
         const baseCol = cxOff * CHUNK_CELLS;
         for (let lz = 0; lz < CHUNK_CELLS; lz++) {
-          buf.set(
-            chunk.subarray(lz * CHUNK_CELLS, (lz + 1) * CHUNK_CELLS),
-            (baseRow + lz) * texels + baseCol
-          );
+          const rowDst = (baseRow + lz) * texels + baseCol;
+          const rowSrc = lz * CHUNK_CELLS;
+          if (!deformChunk) {
+            buf.set(baseChunk.subarray(rowSrc, rowSrc + CHUNK_CELLS), rowDst);
+          } else {
+            for (let lx = 0; lx < CHUNK_CELLS; lx++) {
+              const deform = deformChunk[rowSrc + lx];
+              if (deform <= 0) {
+                buf[rowDst + lx] = baseChunk[rowSrc + lx];
+              } else {
+                const rawH = (baseChunk[rowSrc + lx] * TERRAIN_HEIGHT) / 255;
+                const baseH = Math.max(10, Math.floor(rawH / 4) * 4);
+                buf[rowDst + lx] = Math.round(
+                  (clamp(Math.max(10, baseH - deform), 0, TERRAIN_HEIGHT) * 255) / TERRAIN_HEIGHT
+                );
+              }
+            }
+          }
         }
       }
     }
@@ -472,12 +713,110 @@ export function sampleElevationWindow(
     const rowOff = row * texels;
     for (let col = 0; col < texels; col++) {
       const wx = originX + col * step;
-      buf[rowOff + col] = Math.round(
-        (clamp(mountain(wx, wz, map), 0, TERRAIN_HEIGHT) * 255) / TERRAIN_HEIGHT
-      );
+      buf[rowOff + col] = liveElevationByte(m, wx, wz);
     }
   }
   return buf;
+}
+
+export function sampleElevationRGWindow(
+  map: number,
+  originX: number,
+  originZ: number,
+  texels = ELEVATION_TEXELS,
+  step = ELEVATION_STEP,
+  out?: Uint8Array
+): Uint8Array {
+  const m = mapIndex(map);
+  const buf = out && out.length === texels * texels * 2 ? out : new Uint8Array(texels * texels * 2);
+  if (
+    step === TERRAIN_GRID &&
+    originX % CHUNK_SIZE === 0 &&
+    originZ % CHUNK_SIZE === 0 &&
+    texels % CHUNK_CELLS === 0
+  ) {
+    const chunksPerSide = texels / CHUNK_CELLS;
+    const startCx = originX / CHUNK_SIZE;
+    const startCz = originZ / CHUNK_SIZE;
+    for (let czOff = 0; czOff < chunksPerSide; czOff++) {
+      const baseRow = czOff * CHUNK_CELLS;
+      for (let cxOff = 0; cxOff < chunksPerSide; cxOff++) {
+        const cx = startCx + cxOff;
+        const cz = startCz + czOff;
+        const key = `${cx},${cz}`;
+        const baseChunk = getTerrainChunk(m, cx, cz);
+        const deformChunk = deformCaches[m].get(key);
+        const scorchChunk = scorchCaches[m].get(key);
+        const baseCol = cxOff * CHUNK_CELLS;
+        for (let lz = 0; lz < CHUNK_CELLS; lz++) {
+          const rowDst = ((baseRow + lz) * texels + baseCol) * 2;
+          const rowSrc = lz * CHUNK_CELLS;
+          for (let lx = 0; lx < CHUNK_CELLS; lx++) {
+            const idx = rowSrc + lx;
+            let elevByte = baseChunk[idx];
+            if (deformChunk && deformChunk[idx] > 0) {
+              const rawH = (elevByte * TERRAIN_HEIGHT) / 255;
+              const baseH = Math.max(10, Math.floor(rawH / 4) * 4);
+              elevByte = Math.round(
+                (clamp(Math.max(10, baseH - deformChunk[idx]), 0, TERRAIN_HEIGHT) * 255) / TERRAIN_HEIGHT
+              );
+            }
+            buf[rowDst + lx * 2] = elevByte;
+            buf[rowDst + lx * 2 + 1] = scorchChunk ? scorchChunk[idx] : 0;
+          }
+        }
+      }
+    }
+    return buf;
+  }
+  for (let row = 0; row < texels; row++) {
+    const wz = originZ + row * step;
+    const rowOff = row * texels * 2;
+    for (let col = 0; col < texels; col++) {
+      const wx = originX + col * step;
+      buf[rowOff + col * 2] = liveElevationByte(m, wx, wz);
+      buf[rowOff + col * 2 + 1] = liveScorchByte(m, wx, wz);
+    }
+  }
+  return buf;
+}
+
+export function sampleElevationRGRect(
+  map: number,
+  originX: number,
+  originZ: number,
+  minCol: number,
+  minRow: number,
+  maxCol: number,
+  maxRow: number,
+  texels = ELEVATION_TEXELS,
+  step = ELEVATION_STEP,
+  fullBuffer?: Uint8Array,
+  subOut?: Uint8Array
+): Uint8Array {
+  const m = mapIndex(map);
+  const subW = maxCol - minCol + 1;
+  const subH = maxRow - minRow + 1;
+  const sub = subOut && subOut.length >= subW * subH * 2 ? subOut : new Uint8Array(subW * subH * 2);
+  for (let r = 0; r < subH; r++) {
+    const row = minRow + r;
+    const wz = originZ + row * step;
+    for (let c = 0; c < subW; c++) {
+      const col = minCol + c;
+      const wx = originX + col * step;
+      const elevByte = liveElevationByte(m, wx, wz);
+      const scorchByte = liveScorchByte(m, wx, wz);
+      const subIdx = (r * subW + c) * 2;
+      sub[subIdx] = elevByte;
+      sub[subIdx + 1] = scorchByte;
+      if (fullBuffer) {
+        const fullIdx = (row * texels + col) * 2;
+        fullBuffer[fullIdx] = elevByte;
+        fullBuffer[fullIdx + 1] = scorchByte;
+      }
+    }
+  }
+  return sub;
 }
 
 export function terrainTile(map: number): Uint8Array {
@@ -495,15 +834,15 @@ export function terrainTile(map: number): Uint8Array {
 }
 
 function gridHeight(x: number, z: number, map: number): number {
-  const gx = Math.round(x / TERRAIN_GRID);
-  const gz = Math.round(z / TERRAIN_GRID);
-  const cx = Math.floor(gx / CHUNK_CELLS);
-  const cz = Math.floor(gz / CHUNK_CELLS);
-  const lx = gx - cx * CHUNK_CELLS;
-  const lz = gz - cz * CHUNK_CELLS;
-  const chunk = getTerrainChunk(map, cx, cz);
-  const h = (chunk[lz * CHUNK_CELLS + lx] * TERRAIN_HEIGHT) / 255;
-  return Math.max(10, Math.floor(h / 4) * 4);
+  const m = mapIndex(map);
+  const { cx, cz, idx } = cellCoords(x, z);
+  const chunk = getTerrainChunk(m, cx, cz);
+  const rawH = (chunk[idx] * TERRAIN_HEIGHT) / 255;
+  const baseH = Math.max(10, Math.floor(rawH / 4) * 4);
+  const deformChunk = deformCaches[m].get(`${cx},${cz}`);
+  if (!deformChunk) return baseH;
+  const deform = deformChunk[idx];
+  return deform > 0 ? Math.max(10, baseH - deform) : baseH;
 }
 
 export function terrainHeight(x: number, z: number, map: number): number {
@@ -518,6 +857,74 @@ export function terrainHeight(x: number, z: number, map: number): number {
     return gridHeight(left, top, map) * (1 - u - v) + topRight * u + bottomLeft * v;
   }
   return gridHeight(left + step, top + step, map) * (u + v - 1) + topRight * (1 - v) + bottomLeft * (1 - u);
+}
+
+function landmarkCarveOffset(localX: number, y: number, localZ: number, map: number): number {
+  const carves = landmarkCarves[mapIndex(map)];
+  let offset = 0;
+  for (let i = 0; i < carves.length; i++) {
+    const c = carves[i];
+    const d = Math.hypot(localX - c.x, y - c.y, localZ - c.z);
+    if (d < c.radius) {
+      offset += c.radius - d;
+    }
+  }
+  return Math.min(84, offset);
+}
+
+export function landmarkScorchAt(localX: number, y: number, localZ: number, map: number): number {
+  const carves = landmarkCarves[mapIndex(map)];
+  let intensity = 0;
+  for (let i = 0; i < carves.length; i++) {
+    const c = carves[i];
+    const rimRadius = c.radius * 1.45;
+    const d = Math.hypot(localX - c.x, y - c.y, localZ - c.z);
+    if (d < rimRadius) {
+      const s = c.scorch * smooth(clamp(1 - d / rimRadius, 0, 1));
+      if (s > intensity) intensity = s;
+    }
+  }
+  return intensity;
+}
+
+export function carveLandmark(
+  x: number,
+  y: number,
+  z: number,
+  radius: number,
+  scorch = 0.85,
+  map = 0
+): boolean {
+  if (radius <= 0) return false;
+  const m = mapIndex(map);
+  const lm = m === 1 ? GLACIER_VAULT : VOLCANO;
+  const lx = x - lm.x;
+  const lz = z - lm.z;
+  if (Math.hypot(lx, lz) > lm.radius + radius + 30 || y < 10 || y > 480) {
+    return false;
+  }
+  const carves = landmarkCarves[m];
+  const existing = carves.find(
+    (c) => Math.hypot(c.x - lx, c.y - y, c.z - lz) < 4 && c.radius >= radius
+  );
+  if (existing) {
+    existing.scorch = Math.max(existing.scorch, scorch);
+    existing.radius = Math.min(48, existing.radius + radius * 0.25);
+  } else {
+    if (carves.length >= 128) carves.shift();
+    carves.push({ x: lx, y, z: lz, radius, scorch });
+  }
+  const pad = radius + 14;
+  dirtyLandmarkBoxes[m].push({
+    minX: lx - pad,
+    minY: y - pad,
+    minZ: lz - pad,
+    maxX: lx + pad,
+    maxY: y + pad,
+    maxZ: lz + pad,
+  });
+  landmarkRevisions[m]++;
+  return true;
 }
 
 export function volcanoRadius(x: number, z: number): number {
@@ -537,7 +944,8 @@ export function volcanoDensity(x: number, y: number, z: number, clearance = 0): 
   const along = Math.max(Math.abs(x), Math.abs(z));
   const center = VOLCANO.tunnelAltitude - (along - 140) * 0.07;
   const tunnel = (1 - Math.hypot(crossAxis / 49, (y - center) / 43)) * 43;
-  return Math.min(shell, -Math.max(crater, tunnel)) + clearance;
+  const base = Math.min(shell, -Math.max(crater, tunnel));
+  return base - landmarkCarveOffset(x, y, z, 0) + clearance;
 }
 
 // Glacier Vault on Frostline Reach: faceted ice dome with central cathedral atrium and 4 crystalline tunnels.
@@ -559,7 +967,25 @@ export function glacierDensity(x: number, y: number, z: number, clearance = 0): 
   const along = Math.max(Math.abs(x), Math.abs(z));
   const center = GLACIER_VAULT.tunnelAltitude - (along - 125) * 0.05;
   const tunnel = (1 - Math.hypot(crossAxis / 52, (y - center) / 46)) * 46;
-  return Math.min(shell, -Math.max(atrium, skylight, tunnel)) + clearance;
+  const base = Math.min(shell, -Math.max(atrium, skylight, tunnel));
+  return base - landmarkCarveOffset(x, y, z, 1) + clearance;
+}
+
+export function landmarkDensityAt(x: number, y: number, z: number, map: number, clearance = 0): number {
+  if (map === 0) {
+    const vx = x - VOLCANO.x;
+    const vz = z - VOLCANO.z;
+    if (Math.abs(vx) < 390 && Math.abs(vz) < 390) {
+      return volcanoDensity(vx, y, vz, clearance);
+    }
+  } else if (map === 1) {
+    const gx = x - GLACIER_VAULT.x;
+    const gz = z - GLACIER_VAULT.z;
+    if (Math.abs(gx) < 360 && Math.abs(gz) < 360) {
+      return glacierDensity(gx, y, gz, clearance);
+    }
+  }
+  return -999;
 }
 
 export function height(x: number, z: number, map = 0): number {
@@ -577,20 +1003,7 @@ export function height(x: number, z: number, map = 0): number {
 
 export function solidAt(x: number, y: number, z: number, map: number, clearance = 0): boolean {
   if (y <= terrainHeight(x, z, map) + clearance) return true;
-  if (map === 0) {
-    const vx = x - VOLCANO.x;
-    const vz = z - VOLCANO.z;
-    if (Math.abs(vx) < 390 && Math.abs(vz) < 390 && volcanoDensity(vx, y, vz, clearance) >= 0) {
-      return true;
-    }
-  } else if (map === 1) {
-    const gx = x - GLACIER_VAULT.x;
-    const gz = z - GLACIER_VAULT.z;
-    if (Math.abs(gx) < 360 && Math.abs(gz) < 360 && glacierDensity(gx, y, gz, clearance) >= 0) {
-      return true;
-    }
-  }
-  return false;
+  return landmarkDensityAt(x, y, z, map, clearance) >= 0;
 }
 
 export function respawnPosition(position: Vec3, map: number): Vec3 {

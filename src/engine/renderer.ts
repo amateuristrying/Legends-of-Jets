@@ -4,15 +4,18 @@ import {
   AIRCRAFT_WING_GEOMETRY,
   aircraftBasis,
   clamp,
+  consumeTerrainDirty,
   cross,
   dot,
   ELEVATION_SPAN,
   ELEVATION_STEP,
   ELEVATION_TEXELS,
+  getTerrainRevision,
   GLACIER_VAULT,
   norm,
   planes,
-  sampleElevationWindow,
+  sampleElevationRGRect,
+  sampleElevationRGWindow,
   scale,
   sub,
   TERRAIN_GRID,
@@ -21,7 +24,7 @@ import {
   VOLCANO,
   WING_Y_OFFSET,
 } from './world';
-import { glacierSurface, volcanoSurface, type LandmarkMesh } from './landmarks';
+import { getLandmarkChunks, type LandmarkChunk } from './landmarks';
 
 export type { TrailSample };
 
@@ -159,26 +162,36 @@ void main() {
 const surfaceVertex = `#version 300 es
 precision highp float;
 in vec3 a, n;
+in float aScorch;
 in vec2 tileOrigin;
 out vec3 world, direction, normal;
+out float vScorch;
 uniform vec3 eye, right, up, front;
 uniform vec2 elevationOrigin;
 uniform float aspect, fov, landmark, elevationSpan, elevationTexel;
 uniform sampler2D elevation;
-float groundAt(vec2 p) {
+vec2 groundSample(vec2 p) {
   vec2 uv = clamp((p - elevationOrigin + 0.5 * elevationTexel) / elevationSpan, 0.0, 1.0);
-  float h = textureLod(elevation, uv, 0.).r * ${TERRAIN_HEIGHT}.0;
-  return max(10., floor(h * .25 + .0001) * 4.);
+  return textureLod(elevation, uv, 0.).rg;
+}
+float groundAt(vec2 p) {
+  vec2 s = groundSample(p);
+  float h = s.r * ${TERRAIN_HEIGHT}.0;
+  float stepped = max(10., floor(h * .25 + .0001) * 4.);
+  return mix(stepped, max(10., h), smoothstep(0.02, 0.25, s.g));
 }
 void main() {
   world = a + vec3(tileOrigin.x, 0., tileOrigin.y);
-  if (landmark > .5) normal = n;
-  else {
+  if (landmark > .5) {
+    normal = n;
+    vScorch = aScorch;
+  } else {
     vec2 p = world.xz;
     world.y = groundAt(p);
     float dx = groundAt(p + vec2(12.,0.)) - groundAt(p - vec2(12.,0.));
     float dz = groundAt(p + vec2(0.,12.)) - groundAt(p - vec2(0.,12.));
     normal = normalize(vec3(-dx,24.,-dz));
+    vScorch = 0.;
   }
   direction = world - eye;
   float z = dot(direction, front);
@@ -188,6 +201,7 @@ void main() {
 const surfaceFragment = `#version 300 es
 precision highp float;
 in vec3 world, direction, normal;
+in float vScorch;
 out vec4 color;
 uniform vec3 jet;
 uniform vec2 elevationOrigin;
@@ -215,6 +229,9 @@ void main() {
   }
   float slope = 1. - max(0.,surfaceNormal.y);
   float detail = 1.-smoothstep(300.,2100.,distance);
+  vec2 elevUv = clamp((p.xz - elevationOrigin + 0.5 * elevationTexel) / elevationSpan, 0.0, 1.0);
+  vec2 elevSample = texture(elevation, elevUv).rg;
+  float scorch = landmark > .5 ? vScorch : elevSample.g;
   vec3 c, emission = vec3(0.);
   if (landmark > .5 && map == 0) {
     // Active Volcano: Ashmouth Caldera at [0, 0] with glowing magma veins & molten lava floor
@@ -234,6 +251,11 @@ void main() {
       c = mix(vec3(.14,.09,.09), c, smoothstep(55., 63., p.y));
       emission += mix(vec3(.88,.16,.02), vec3(1.0,.62,.10), molten) * (.68 + molten * .45);
     }
+    if (scorch > .02) {
+      float blastCrack = 1. - abs(2. * fbm(p.xz * .18 + p.y * .11) - 1.);
+      c = mix(c, vec3(.06,.045,.045), smoothstep(.04, .65, scorch) * .85);
+      emission += mix(vec3(.95,.22,.03), vec3(1.,.65,.15), blastCrack) * smoothstep(.35, .95, scorch) * (.45 + blastCrack * .55);
+    }
     vec2 axis = abs(q);
     if (min(axis.x,axis.y)>33. && min(axis.x,axis.y)<51. && abs(p.y-${VOLCANO.tunnelAltitude}.0)<12.) {
       float strip = 1.-smoothstep(2.,6.,abs(mod(max(axis.x,axis.y), 35.)-17.5));
@@ -252,6 +274,11 @@ void main() {
     c = mix(obsidian, vec3(.84,.92,.96), snowCap * .88);
     c = mix(c, mix(vec3(.36,.68,.84), vec3(.78,.93,.98), iceFacet), iceShelf * .82);
     c += (iceFacet - .5) * .08 * detail;
+    if (scorch > .02) {
+      float fracture = pow(clamp(1. - abs(2. * fbm(p.xz * .21 + p.y * .14) - 1.), 0., 1.), 2.2);
+      vec3 shattered = mix(vec3(.09,.12,.16), vec3(.19,.30,.39), fracture);
+      c = mix(c, shattered, smoothstep(.04, .75, scorch) * .9);
+    }
     float glint = pow(clamp(1. - abs(2. * iceFacet - 1.), 0., 1.), 4.) * iceShelf;
     emission = vec3(.16,.58,.78) * glint * .28 * detail;
     vec2 axis = abs(q);
@@ -260,8 +287,7 @@ void main() {
       emission += vec3(.32,.96,1.) * strip * .68 * detail;
     }
   } else if (p.y <= 10.015) {
-    vec2 uv = clamp((p.xz - elevationOrigin + 0.5 * elevationTexel) / elevationSpan, 0.0, 1.0);
-    float shelves = texture(elevation, uv).r * ${TERRAIN_HEIGHT}.0;
+    float shelves = elevSample.r * ${TERRAIN_HEIGHT}.0;
     c = map == 0 ? vec3(.10,.34,.35) : vec3(.063,.26,.46);
     c = mix(c, map == 0 ? vec3(.22,.48,.42) : vec3(.16,.52,.63), smoothstep(4.,13.,shelves)*.67);
     float swell = fbm(p.xz * .034 + vec2(clock * .08, -clock * .05)) * 2. - 1. + sin(p.x * .07 + p.z * .11 + clock * 1.1) * .35;
@@ -287,6 +313,27 @@ void main() {
       c += (strata - .5) * .034 * detail;
     }
     c += (stone-.5) * .092 * detail + grain * grainContrast;
+    if (scorch > .005) {
+      float scorchBreakup = fbm(p.xz * .13) * .36 + fbm(p.xz * .37) * .18;
+      float charMask = smoothstep(.04, .56, scorch + (scorchBreakup - .22) * scorch);
+      float coreMask = smoothstep(.42, .94, scorch + (scorchBreakup - .24) * .45);
+      if (map == 0) {
+        // Ember Canyon craters: blackened soot / charred stone + glowing hot crater centers
+        vec3 soot = mix(vec3(.08,.06,.055), vec3(.15,.11,.09), scorchBreakup);
+        c = mix(c, soot, charMask * .92);
+        float hotCracks = pow(clamp(1. - abs(2. * fbm(p.xz * .26) - 1.), 0., 1.), 1.8);
+        vec3 ember = mix(vec3(.92,.22,.04), vec3(1.,.64,.14), hotCracks);
+        c = mix(c, ember * .7, coreMask * .42);
+        emission += ember * coreMask * (.38 + hotCracks * .62) * (.86 + .14 * sin(clock * 3.1 + p.x * .08));
+      } else {
+        // Frostline Reach craters: fractured dark ice & exposed basalt
+        float fracture = pow(clamp(1. - abs(2. * fbm(p.xz * .24) - 1.), 0., 1.), 2.0);
+        vec3 darkIce = mix(vec3(.13,.24,.34), vec3(.22,.36,.46), fracture);
+        vec3 basalt = mix(vec3(.07,.08,.11), vec3(.13,.15,.19), scorchBreakup);
+        c = mix(c, darkIce, charMask * .86);
+        c = mix(c, basalt, coreMask * .88);
+      }
+    }
   }
   vec3 sunDir = atmo == 1 ? normalize(vec3(-.75,.32,.63)) : normalize(vec3(-.59,.71,.38));
   float light = max(0.,dot(surfaceNormal,sunDir));
@@ -485,8 +532,66 @@ export function aircraftPoints(type: number): Float32Array {
   return new Float32Array(points);
 }
 
-function buildStructurePoints(kind: 'radar' | 'aa' | 'relay' | 'core' | 'ring' | 'rearm' | 'refuel'): Float32Array {
+type StructureKind =
+  | 'radar'
+  | 'aa'
+  | 'relay'
+  | 'core'
+  | 'radar_ruin'
+  | 'aa_ruin'
+  | 'relay_ruin'
+  | 'core_ruin'
+  | 'ring'
+  | 'rearm'
+  | 'refuel';
+
+function buildStructurePoints(kind: StructureKind): Float32Array {
   const pts: number[] = [];
+  if (kind === 'radar_ruin') {
+    for (let i = 0; i < 16; i++) {
+      const a = (i / 16) * Math.PI * 2;
+      const r = 7 + (i % 3) * 2.2;
+      const h = (i % 4) * 1.4;
+      pts.push(Math.cos(a) * r, h, Math.sin(a) * r, 0.16, 0.15, 0.14);
+      if (i % 2 === 0) {
+        pts.push(Math.cos(a + 0.2) * (r * 0.55), h + 1.5, Math.sin(a + 0.2) * (r * 0.55), 0.34, 0.18, 0.12);
+      }
+    }
+    pts.push(0, 2.2, 0, 0.92, 0.32, 0.08, 2, 1.5, -1.5, 0.85, 0.24, 0.06);
+    return new Float32Array(pts);
+  }
+  if (kind === 'aa_ruin') {
+    for (let i = 0; i < 14; i++) {
+      const a = (i / 14) * Math.PI * 2;
+      const r = 5 + (i % 3) * 1.8;
+      pts.push(Math.cos(a) * r, (i % 3) * 1.2, Math.sin(a) * r, 0.15, 0.13, 0.12);
+    }
+    for (let t = 0; t < 4; t++) {
+      pts.push(t * 1.1, 3 + t * 0.6, -t * 0.9, 0.24, 0.18, 0.16);
+    }
+    pts.push(-1, 2.4, 1, 0.95, 0.34, 0.08);
+    return new Float32Array(pts);
+  }
+  if (kind === 'relay_ruin') {
+    for (let y = 0; y <= 14; y += 2.5) {
+      const lean = y * 0.45;
+      for (let i = 0; i < 4; i++) {
+        const a = (i / 4) * Math.PI * 2;
+        pts.push(Math.cos(a) * 3.5 + lean, y, Math.sin(a) * 3.5 + lean * 0.4, 0.22, 0.23, 0.24);
+      }
+    }
+    pts.push(6, 13, 2.5, 0.96, 0.42, 0.12, 1, 2, 0, 0.85, 0.26, 0.08);
+    return new Float32Array(pts);
+  }
+  if (kind === 'core_ruin') {
+    for (let i = 0; i < 14; i++) {
+      const a = (i / 14) * Math.PI * 2;
+      const r = 6 + (i % 3) * 2.2;
+      pts.push(Math.cos(a) * r, ((i % 3) - 1) * 2.2, Math.sin(a) * r, 0.18, 0.14, 0.13);
+    }
+    pts.push(0, 0, 0, 0.95, 0.35, 0.08, 2, 1, -2, 0.72, 0.22, 0.08);
+    return new Float32Array(pts);
+  }
   if (kind === 'refuel') {
     // Central Volcano Refuel & Rearm Depot: glowing teal horizontal ring + vertical diamond core
     const segs = 36;
@@ -610,8 +715,17 @@ interface BufferHandle {
 
 interface SurfaceHandle {
   vao: WebGLVertexArrayObject;
+  vertexBuffer: WebGLBuffer;
+  indexBuffer: WebGLBuffer;
   count: number;
   type: number;
+}
+
+interface LandmarkChunkGpu {
+  handle: SurfaceHandle;
+  version: number;
+  center: Vec3;
+  radius: number;
 }
 
 export class Renderer {
@@ -624,6 +738,7 @@ export class Renderer {
   skyPosition: number;
   terrainPosition: number;
   terrainNormal: number;
+  terrainScorch: number;
   terrainOffset: number;
   pointPosition: number;
   pointColor: number;
@@ -641,12 +756,18 @@ export class Renderer {
   locations: Map<WebGLProgram, Map<string, WebGLUniformLocation | null>>;
   elevations: Map<
     number,
-    { texture: WebGLTexture; originX: number; originZ: number; buffer: Uint8Array }
+    {
+      texture: WebGLTexture;
+      originX: number;
+      originZ: number;
+      buffer: Uint8Array;
+      subBuffer: Uint8Array;
+      revision: number;
+    }
   >;
   trailBuffer: WebGLBuffer;
   trailData: Float32Array;
-  caldera?: SurfaceHandle;
-  glacier?: SurfaceHandle;
+  landmarkGpuChunks: Map<number, Map<string, LandmarkChunkGpu>>;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -667,11 +788,15 @@ export class Renderer {
     this.skyPosition = gl.getAttribLocation(this.sky, 'a');
     this.terrainPosition = gl.getAttribLocation(this.terrain, 'a');
     this.terrainNormal = gl.getAttribLocation(this.terrain, 'n');
+    this.terrainScorch = gl.getAttribLocation(this.terrain, 'aScorch');
     this.terrainOffset = gl.getAttribLocation(this.terrain, 'tileOrigin');
     this.pointPosition = gl.getAttribLocation(this.points, 'a');
     this.pointColor = gl.getAttribLocation(this.points, 'c');
     this.trailPosition = gl.getAttribLocation(this.trailProgram, 'a');
     this.trailAlpha = gl.getAttribLocation(this.trailProgram, 'alpha');
+    if (this.terrainScorch >= 0) {
+      gl.vertexAttrib1f(this.terrainScorch, 0);
+    }
 
     const quad = gl.createBuffer()!;
     this.skyVao = gl.createVertexArray()!;
@@ -711,6 +836,10 @@ export class Renderer {
       ['aa', this.buffer(buildStructurePoints('aa'))],
       ['relay', this.buffer(buildStructurePoints('relay'))],
       ['core', this.buffer(buildStructurePoints('core'))],
+      ['radar_ruin', this.buffer(buildStructurePoints('radar_ruin'))],
+      ['aa_ruin', this.buffer(buildStructurePoints('aa_ruin'))],
+      ['relay_ruin', this.buffer(buildStructurePoints('relay_ruin'))],
+      ['core_ruin', this.buffer(buildStructurePoints('core_ruin'))],
       ['ring', this.buffer(buildStructurePoints('ring'))],
       ['rearm', this.buffer(buildStructurePoints('rearm'))],
       ['refuel', this.buffer(buildStructurePoints('refuel'))],
@@ -734,6 +863,7 @@ export class Renderer {
 
     this.locations = new Map();
     this.elevations = new Map();
+    this.landmarkGpuChunks = new Map();
     this.trailBuffer = gl.createBuffer()!;
     this.trailData = new Float32Array(64 * 2 * 4);
     this.trailVao = gl.createVertexArray()!;
@@ -802,11 +932,15 @@ export class Renderer {
     const snapZ = Math.round(eyeZ / 128) * 128;
     const originX = snapX - ELEVATION_SPAN / 2;
     const originZ = snapZ - ELEVATION_SPAN / 2;
+    const rev = getTerrainRevision(map);
     const existing = this.elevations.get(map);
     if (!existing) {
       const texture = gl.createTexture()!;
-      const buffer = sampleElevationWindow(map, originX, originZ, ELEVATION_TEXELS, ELEVATION_STEP);
+      const buffer = sampleElevationRGWindow(map, originX, originZ, ELEVATION_TEXELS, ELEVATION_STEP);
+      const subBuffer = new Uint8Array(ELEVATION_TEXELS * ELEVATION_TEXELS * 2);
+      consumeTerrainDirty(map);
       gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -814,23 +948,27 @@ export class Renderer {
       gl.texImage2D(
         gl.TEXTURE_2D,
         0,
-        gl.R8,
+        gl.RG8,
         ELEVATION_TEXELS,
         ELEVATION_TEXELS,
         0,
-        gl.RED,
+        gl.RG,
         gl.UNSIGNED_BYTE,
         buffer
       );
-      const entry = { texture, originX, originZ, buffer };
+      const entry = { texture, originX, originZ, buffer, subBuffer, revision: rev };
       this.elevations.set(map, entry);
       return entry;
     }
+
     if (existing.originX !== originX || existing.originZ !== originZ) {
-      sampleElevationWindow(map, originX, originZ, ELEVATION_TEXELS, ELEVATION_STEP, existing.buffer);
+      sampleElevationRGWindow(map, originX, originZ, ELEVATION_TEXELS, ELEVATION_STEP, existing.buffer);
+      consumeTerrainDirty(map);
       existing.originX = originX;
       existing.originZ = originZ;
+      existing.revision = rev;
       gl.bindTexture(gl.TEXTURE_2D, existing.texture);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
       gl.texSubImage2D(
         gl.TEXTURE_2D,
         0,
@@ -838,10 +976,71 @@ export class Renderer {
         0,
         ELEVATION_TEXELS,
         ELEVATION_TEXELS,
-        gl.RED,
+        gl.RG,
         gl.UNSIGNED_BYTE,
         existing.buffer
       );
+      return existing;
+    }
+
+    if (existing.revision !== rev) {
+      existing.revision = rev;
+      const dirty = consumeTerrainDirty(map);
+      gl.bindTexture(gl.TEXTURE_2D, existing.texture);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      if (dirty.full || !dirty.bounds) {
+        sampleElevationRGWindow(map, originX, originZ, ELEVATION_TEXELS, ELEVATION_STEP, existing.buffer);
+        gl.texSubImage2D(
+          gl.TEXTURE_2D,
+          0,
+          0,
+          0,
+          ELEVATION_TEXELS,
+          ELEVATION_TEXELS,
+          gl.RG,
+          gl.UNSIGNED_BYTE,
+          existing.buffer
+        );
+      } else {
+        const minCol = Math.max(0, Math.floor((dirty.bounds.minX - originX) / ELEVATION_STEP));
+        const maxCol = Math.min(
+          ELEVATION_TEXELS - 1,
+          Math.ceil((dirty.bounds.maxX - originX) / ELEVATION_STEP)
+        );
+        const minRow = Math.max(0, Math.floor((dirty.bounds.minZ - originZ) / ELEVATION_STEP));
+        const maxRow = Math.min(
+          ELEVATION_TEXELS - 1,
+          Math.ceil((dirty.bounds.maxZ - originZ) / ELEVATION_STEP)
+        );
+        if (minCol <= maxCol && minRow <= maxRow) {
+          const subW = maxCol - minCol + 1;
+          const subH = maxRow - minRow + 1;
+          const packed = sampleElevationRGRect(
+            map,
+            originX,
+            originZ,
+            minCol,
+            minRow,
+            maxCol,
+            maxRow,
+            ELEVATION_TEXELS,
+            ELEVATION_STEP,
+            existing.buffer,
+            existing.subBuffer
+          );
+          gl.texSubImage2D(
+            gl.TEXTURE_2D,
+            0,
+            minCol,
+            minRow,
+            subW,
+            subH,
+            gl.RG,
+            gl.UNSIGNED_BYTE,
+            packed.subarray(0, subW * subH * 2)
+          );
+        }
+      }
     }
     return existing;
   }
@@ -854,32 +1053,73 @@ export class Renderer {
     const vao = gl.createVertexArray()!;
     const vertexBuffer = gl.createBuffer()!;
     const indexBuffer = gl.createBuffer()!;
+    const stride = withNormals ? 28 : 12;
     gl.bindVertexArray(vao);
     gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, mesh.vertices, gl.STATIC_DRAW);
     gl.enableVertexAttribArray(this.terrainPosition);
-    gl.vertexAttribPointer(this.terrainPosition, 3, gl.FLOAT, false, withNormals ? 24 : 12, 0);
+    gl.vertexAttribPointer(this.terrainPosition, 3, gl.FLOAT, false, stride, 0);
     if (withNormals) {
       gl.enableVertexAttribArray(this.terrainNormal);
-      gl.vertexAttribPointer(this.terrainNormal, 3, gl.FLOAT, false, 24, 12);
+      gl.vertexAttribPointer(this.terrainNormal, 3, gl.FLOAT, false, stride, 12);
+      if (this.terrainScorch >= 0) {
+        gl.enableVertexAttribArray(this.terrainScorch);
+        gl.vertexAttribPointer(this.terrainScorch, 1, gl.FLOAT, false, stride, 24);
+      }
     }
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
     gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, mesh.indices, gl.STATIC_DRAW);
     gl.bindVertexArray(null);
     return {
       vao,
+      vertexBuffer,
+      indexBuffer,
       count: mesh.indices.length,
       type: withNormals ? gl.UNSIGNED_INT : gl.UNSIGNED_SHORT,
     };
   }
 
+  private syncLandmarkChunks(map: number): Map<string, LandmarkChunkGpu> {
+    const m = map === 1 ? 1 : 0;
+    const chunks = getLandmarkChunks(m);
+    let gpuMap = this.landmarkGpuChunks.get(m);
+    if (!gpuMap) {
+      gpuMap = new Map();
+      this.landmarkGpuChunks.set(m, gpuMap);
+    }
+    const gl = this.gl;
+    const activeKeys = new Set<string>();
+    for (const chunk of chunks) {
+      activeKeys.add(chunk.key);
+      const existing = gpuMap.get(chunk.key);
+      if (!existing || existing.version !== chunk.version) {
+        if (existing) {
+          gl.deleteVertexArray(existing.handle.vao);
+          gl.deleteBuffer(existing.handle.vertexBuffer);
+          gl.deleteBuffer(existing.handle.indexBuffer);
+        }
+        gpuMap.set(chunk.key, {
+          handle: this.surfaceBuffer(chunk, true),
+          version: chunk.version,
+          center: chunk.center,
+          radius: chunk.radius,
+        });
+      }
+    }
+    for (const [key, gpu] of gpuMap.entries()) {
+      if (!activeKeys.has(key)) {
+        gl.deleteVertexArray(gpu.handle.vao);
+        gl.deleteBuffer(gpu.handle.vertexBuffer);
+        gl.deleteBuffer(gpu.handle.indexBuffer);
+        gpuMap.delete(key);
+      }
+    }
+    return gpuMap;
+  }
+
   prepare(map: number): void {
     this.elevationTexture(map);
-    if (map === 0 && !this.caldera) {
-      this.caldera = this.surfaceBuffer(volcanoSurface() as LandmarkMesh, true);
-    } else if (map === 1 && !this.glacier) {
-      this.glacier = this.surfaceBuffer(glacierSurface() as LandmarkMesh, true);
-    }
+    this.syncLandmarkChunks(map);
   }
 
   drawSurfaces(
@@ -931,22 +1171,16 @@ export class Renderer {
     gl.drawElementsInstanced(gl.TRIANGLES, this.patch.count, this.patch.type, 0, patches.length);
     gl.disable(gl.CULL_FACE);
 
-    if (
-      state.map === 0 &&
-      visibleBounds([VOLCANO.x, 220, VOLCANO.z], 435, camera, aspect, mapRadius)
-    ) {
-      if (!this.caldera) this.caldera = this.surfaceBuffer(volcanoSurface(), true);
+    const lmCenter: Vec3 = state.map === 1 ? [GLACIER_VAULT.x, 200, GLACIER_VAULT.z] : [VOLCANO.x, 220, VOLCANO.z];
+    const lmRadius = state.map === 1 ? 400 : 435;
+    if (visibleBounds(lmCenter, lmRadius, camera, aspect, mapRadius)) {
+      const gpuChunks = this.syncLandmarkChunks(state.map);
       this.uniform(this.terrain, 'landmark', 1);
-      gl.bindVertexArray(this.caldera.vao);
-      gl.drawElements(gl.TRIANGLES, this.caldera.count, this.caldera.type, 0);
-    } else if (
-      state.map === 1 &&
-      visibleBounds([GLACIER_VAULT.x, 200, GLACIER_VAULT.z], 400, camera, aspect, mapRadius)
-    ) {
-      if (!this.glacier) this.glacier = this.surfaceBuffer(glacierSurface(), true);
-      this.uniform(this.terrain, 'landmark', 1);
-      gl.bindVertexArray(this.glacier.vao);
-      gl.drawElements(gl.TRIANGLES, this.glacier.count, this.glacier.type, 0);
+      for (const chunk of gpuChunks.values()) {
+        if (!visibleBounds(chunk.center, chunk.radius, camera, aspect, mapRadius)) continue;
+        gl.bindVertexArray(chunk.handle.vao);
+        gl.drawElements(gl.TRIANGLES, chunk.handle.count, chunk.handle.type, 0);
+      }
     }
 
     gl.bindVertexArray(null);

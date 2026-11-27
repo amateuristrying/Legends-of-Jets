@@ -5,16 +5,21 @@ import type {
   FlightState,
   GroundTarget,
   MissionState,
+  ShotEntity,
   Vec3,
   WeaponsState,
 } from './types';
 import {
   add,
+  applyTerrainImpact,
+  carveLandmark,
   clamp,
   dist3,
   dot,
   forward,
   height,
+  landmarkDensityAt,
+  mix,
   norm,
   planes,
   pruneTrail,
@@ -22,7 +27,19 @@ import {
   scale,
   solidAt,
   sub,
+  terrainHeight,
 } from './world';
+
+export const WEAPON_IMPACT_PROFILES: Record<
+  ShotEntity['kind'],
+  { radius: number; depth: number; scorch: number; landmarkCarve: number }
+> = {
+  tracer: { radius: 4, depth: 0.8, scorch: 0.35, landmarkCarve: 0 },
+  enemyTracer: { radius: 4, depth: 0.6, scorch: 0.3, landmarkCarve: 0 },
+  rocket: { radius: 18, depth: 10, scorch: 0.72, landmarkCarve: 14 },
+  missile: { radius: 34, depth: 22, scorch: 1.0, landmarkCarve: 22 },
+  enemyMissile: { radius: 34, depth: 22, scorch: 1.0, landmarkCarve: 22 },
+};
 
 export const HOSTILE_TINT: Vec3 = [0.86, 0.23, 0.21];
 export const BOSS_TINT: Vec3 = [0.98, 0.42, 0.12];
@@ -594,6 +611,100 @@ export function stepAircraftAI(
   }
 }
 
+function findImpactPoint(prevPos: Vec3, endPos: Vec3, map: number): Vec3 {
+  let lo = 0;
+  let hi = 1;
+  for (let i = 0; i < 4; i++) {
+    const mid = (lo + hi) * 0.5;
+    const px = mix(prevPos[0], endPos[0], mid);
+    const py = mix(prevPos[1], endPos[1], mid);
+    const pz = mix(prevPos[2], endPos[2], mid);
+    if (solidAt(px, py, pz, map)) hi = mid;
+    else lo = mid;
+  }
+  return [
+    mix(prevPos[0], endPos[0], hi),
+    mix(prevPos[1], endPos[1], hi),
+    mix(prevPos[2], endPos[2], hi),
+  ];
+}
+
+function spawnImpactVfx(
+  mission: MissionState,
+  pos: Vec3,
+  kind: ShotEntity['kind']
+): void {
+  if (kind === 'tracer' || kind === 'enemyTracer') {
+    for (let i = 0; i < 3; i++) {
+      const a = i * 2.1;
+      spawnEffect(
+        mission,
+        i === 0 ? 'spark' : 'smoke',
+        pos,
+        [Math.cos(a) * 10, 8 + i * 3, Math.sin(a) * 10],
+        0.26 + i * 0.12,
+        i === 0 ? 4.5 : 5.5
+      );
+    }
+    return;
+  }
+
+  const isMissile = kind === 'missile' || kind === 'enemyMissile';
+  if (isMissile) {
+    mission.flash = Math.max(mission.flash, 0.28);
+    mission.shake = Math.max(mission.shake, 0.36);
+  } else {
+    mission.flash = Math.max(mission.flash, 0.14);
+    mission.shake = Math.max(mission.shake, 0.18);
+  }
+
+  const burstCount = isMissile ? 20 : 11;
+  for (let i = 0; i < burstCount; i++) {
+    const a = i * 2.39996;
+    const spd = (isMissile ? 28 : 18) + (i % 5) * 9;
+    spawnEffect(
+      mission,
+      i % 3 === 0 ? 'fire' : i % 2 === 0 ? 'debris' : 'spark',
+      pos,
+      [Math.cos(a) * spd, 12 + (i % 6) * (isMissile ? 10 : 7), Math.sin(a) * spd],
+      (isMissile ? 0.65 : 0.45) + (i % 4) * 0.12,
+      (isMissile ? 7.5 : 5.5) + (i % 4)
+    );
+  }
+  const smokeCount = isMissile ? 8 : 4;
+  for (let s = 0; s < smokeCount; s++) {
+    const a = (s / smokeCount) * Math.PI * 2;
+    const radial = isMissile ? 24 : 12;
+    spawnEffect(
+      mission,
+      'smoke',
+      pos,
+      [Math.cos(a) * radial, (isMissile ? 22 : 14) + s * 2, Math.sin(a) * radial],
+      (isMissile ? 1.5 : 1.0) + s * 0.12,
+      (isMissile ? 12 : 8) + (s % 3) * 2
+    );
+  }
+}
+
+function handleSurfaceImpact(
+  mission: MissionState,
+  prevPos: Vec3,
+  endPos: Vec3,
+  kind: ShotEntity['kind'],
+  map: number
+): void {
+  const impact = findImpactPoint(prevPos, endPos, map);
+  const profile = WEAPON_IMPACT_PROFILES[kind];
+  const groundY = terrainHeight(impact[0], impact[2], map);
+  if (impact[1] <= groundY + 6) {
+    applyTerrainImpact(impact[0], impact[2], profile.radius, profile.depth, profile.scorch, map);
+  }
+  if (profile.landmarkCarve > 0 && landmarkDensityAt(impact[0], impact[1], impact[2], map, 4) >= 0) {
+    carveLandmark(impact[0], impact[1], impact[2], profile.landmarkCarve, profile.scorch, map);
+  }
+  spawnImpactVfx(mission, impact, kind);
+}
+
 export function stepGroundTargets(
   mission: MissionState,
   flight: FlightState,
@@ -601,7 +712,32 @@ export function stepGroundTargets(
   dt: number
 ): void {
   for (const gt of mission.groundTargets) {
-    if (gt.destroyed || gt.friendly || gt.kind !== 'aa' || flight.death > 0) continue;
+    if (gt.destroyed) {
+      gt.fireCooldown -= dt;
+      if (gt.fireCooldown <= 0 && dist3(gt.pos, flight.pos) < 3200) {
+        gt.fireCooldown = 0.16;
+        spawnEffect(
+          mission,
+          'smoke',
+          add(gt.pos, [(Math.random() - 0.5) * 8, 3, (Math.random() - 0.5) * 8]),
+          [(Math.random() - 0.5) * 6, 16 + Math.random() * 10, (Math.random() - 0.5) * 6],
+          1.8 + Math.random() * 0.9,
+          7 + Math.random() * 5
+        );
+        if (Math.random() < 0.45) {
+          spawnEffect(
+            mission,
+            Math.random() < 0.5 ? 'fire' : 'spark',
+            add(gt.pos, [(Math.random() - 0.5) * 6, 2, (Math.random() - 0.5) * 6]),
+            [(Math.random() - 0.5) * 8, 12 + Math.random() * 10, (Math.random() - 0.5) * 8],
+            0.6 + Math.random() * 0.4,
+            4 + Math.random() * 2.5
+          );
+        }
+      }
+      continue;
+    }
+    if (gt.friendly || gt.kind !== 'aa' || flight.death > 0) continue;
     gt.fireCooldown -= dt;
     const range = dist3(gt.pos, flight.pos);
     if (gt.fireCooldown <= 0 && range < 780 && range > 60 && clearPath(gt.pos, flight.pos, map)) {
@@ -655,11 +791,12 @@ export function updateShots(
       );
     }
 
+    const prevPos = shot.pos;
     shot.pos = add(shot.pos, scale(shot.velocity, dt));
     if (solidAt(shot.pos[0], shot.pos[1], shot.pos[2], map)) {
       shot.life = 0;
-      if (shot.kind === 'rocket' || shot.kind === 'missile') {
-        spawnEffect(mission, 'spark', shot.pos, [0, 12, 0], 0.28, 7);
+      if (!shot.visual) {
+        handleSurfaceImpact(mission, prevPos, shot.pos, shot.kind, map);
       }
       continue;
     }
@@ -762,8 +899,10 @@ export function updateShots(
       }
       if (gt.hp <= 0) {
         gt.destroyed = true;
+        gt.fireCooldown = 0;
         mission.groundKills++;
         groundKillsDelta++;
+        applyTerrainImpact(gt.pos[0], gt.pos[2], 14, 3, 0.85, map);
         explosionBurst(mission, gt.pos, true);
         pushKillFeed(mission, `${shot.ownerName ?? 'YOU'} ✕ ${gt.name}`, '#ffd37a');
         tell(mission, `TARGET DESTROYED • ${gt.name}`);

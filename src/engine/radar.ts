@@ -7,9 +7,11 @@ import {
   dist3,
   dot,
   forward,
+  getTerrainRevision,
   GLACIER_VAULT,
   height,
   scale,
+  scorchAt,
   sub,
   VOLCANO,
 } from './world';
@@ -45,7 +47,8 @@ export class Radar {
     const stride = (range * 182) / 78 / n;
     const x = Math.round(flight.pos[0] / stride) * stride;
     const z = Math.round(flight.pos[2] / stride) * stride;
-    const key = [x, z, map, range].join('/');
+    const rev = getTerrainRevision(map);
+    const key = [x, z, map, range, rev].join('/');
     if (key === this.lastTerrain) return;
     this.lastTerrain = key;
     this.tileCenter = [x, z];
@@ -59,34 +62,52 @@ export class Radar {
         const worldX = x + (col + 0.5 - n / 2) * stride;
         const m = height(worldX, worldZ, map);
         const level = Math.floor(m / 42) * 4;
+        const scorch = scorchAt(worldX, worldZ, map);
         const dilate =
           map === 0
             ? Math.hypot(worldX - VOLCANO.x, worldZ - VOLCANO.z) < 365
             : Math.hypot(worldX - GLACIER_VAULT.x, worldZ - GLACIER_VAULT.z) < 335;
         const idx = (row * n + col) * 4;
+        let r = 0;
+        let g = 0;
+        let b = 0;
         if (m <= 10) {
-          data[idx] = 12;
-          data[idx + 1] = 37;
-          data[idx + 2] = 51;
+          r = 12;
+          g = 37;
+          b = 51;
         } else if (dilate) {
           if (ice) {
-            data[idx] = 34 + level;
-            data[idx + 1] = 78 + level;
-            data[idx + 2] = 96 + level;
+            r = 34 + level;
+            g = 78 + level;
+            b = 96 + level;
           } else {
-            data[idx] = 70 + level;
-            data[idx + 1] = 37 + level;
-            data[idx + 2] = 29 + level;
+            r = 70 + level;
+            g = 37 + level;
+            b = 29 + level;
           }
         } else if (ice) {
-          data[idx] = 25 + level;
-          data[idx + 1] = 51 + level;
-          data[idx + 2] = 64 + level;
+          r = 25 + level;
+          g = 51 + level;
+          b = 64 + level;
         } else {
-          data[idx] = 38 + level;
-          data[idx + 1] = 48 + level;
-          data[idx + 2] = 42 + level;
+          r = 38 + level;
+          g = 48 + level;
+          b = 42 + level;
         }
+        if (scorch > 0.04) {
+          if (ice) {
+            r = Math.round(r * (1 - scorch * 0.55) + 18 * scorch);
+            g = Math.round(g * (1 - scorch * 0.6) + 24 * scorch);
+            b = Math.round(b * (1 - scorch * 0.55) + 30 * scorch);
+          } else {
+            r = Math.round(r * (1 - scorch * 0.5) + 75 * scorch);
+            g = Math.round(g * (1 - scorch * 0.72) + 24 * scorch);
+            b = Math.round(b * (1 - scorch * 0.8) + 14 * scorch);
+          }
+        }
+        data[idx] = r;
+        data[idx + 1] = g;
+        data[idx + 2] = b;
         data[idx + 3] = 255;
       }
     }
