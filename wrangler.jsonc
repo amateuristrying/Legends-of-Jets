@@ -1,0 +1,19 @@
+{
+  "name": "legends-of-jets",
+  "main": "./server/index.js",
+  "compatibility_date": "2026-11-01",
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/crew/*"]
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "CREW_DIRECTORY", "class_name": "CrewDirectory" },
+      { "name": "CREW_ROOMS", "class_name": "CrewRoom" }
+    ]
+  },
+  "migrations": [
+    { "tag": "crew-v1", "new_sqlite_classes": ["CrewDirectory", "CrewRoom"] }
+  ]
+}
