@@ -1,5 +1,6 @@
 import type {
   AircraftEntity,
+  BossProfile,
   BotDifficulty,
   ControlInput,
   FlightState,
@@ -44,6 +45,23 @@ export const WEAPON_IMPACT_PROFILES: Record<
 export const HOSTILE_TINT: Vec3 = [0.86, 0.23, 0.21];
 export const BOSS_TINT: Vec3 = [0.98, 0.42, 0.12];
 export const FRIENDLY_TINT: Vec3 = [0.2, 0.72, 0.86];
+
+export const BOSS_PROFILE_LABELS: Record<BossProfile, string> = {
+  joust: 'HIGH-SPEED JOUST',
+  stealth: 'STEALTH FLANKER',
+  razor: 'RAZOR SCISSORS',
+  volley: 'SALVO COMMANDER',
+  sovereign: 'APEX OVERDRIVE',
+};
+
+export function bossProfileForName(name?: string): BossProfile {
+  const upper = (name ?? '').toUpperCase();
+  if (upper.includes('GLACIER')) return 'stealth';
+  if (upper.includes('PYRE')) return 'razor';
+  if (upper.includes('SUBZERO')) return 'volley';
+  if (upper.includes('SOVEREIGN')) return 'sovereign';
+  return 'joust';
+}
 
 export const BOT_TUNING: Record<
   BotDifficulty,
@@ -365,7 +383,7 @@ export function createAircraft(
   friendly: boolean,
   index: number,
   difficulty: BotDifficulty = 'standard',
-  opts?: { isBoss?: boolean; isEscortTarget?: boolean; hp?: number }
+  opts?: { isBoss?: boolean; bossProfile?: BossProfile; isEscortTarget?: boolean; hp?: number }
 ): AircraftEntity {
   const spec = planes[type] ?? planes[0];
   const maxHp = opts?.hp ?? (opts?.isBoss ? 260 : opts?.isEscortTarget ? 180 : spec.hull);
@@ -383,14 +401,18 @@ export function createAircraft(
     tint: friendly ? FRIENDLY_TINT : opts?.isBoss ? BOSS_TINT : HOSTILE_TINT,
     friendly,
     isBoss: opts?.isBoss,
+    bossProfile: opts?.bossProfile ?? (opts?.isBoss ? bossProfileForName(name) : undefined),
+    bossPhaseTimer: 0,
+    bossOverdrive: false,
     isEscortTarget: opts?.isEscortTarget,
+    extracted: false,
     index,
     hp: maxHp,
     maxHp,
     fire: 2.2 + index * 1.4,
     gunBurst: 0,
     flareCooldown: 0,
-    missiles: opts?.isBoss ? 8 : 3,
+    missiles: opts?.isBoss ? 12 : 3,
     difficulty,
     trail: [],
     lastTrailTime: -1,
@@ -438,12 +460,27 @@ export function stepAircraftAI(
   let targetSpeed = 100;
   let targetYaw = 0;
   let targetPitch = 0;
-  let liveTarget: AircraftEntity | FlightState | null = null;
+  let liveTarget: AircraftEntity | FlightState | GroundTarget | null = null;
+  let turnMult = 1;
+  let speedMultBonus = 1;
+  let rollExtra = 0;
 
   if (ac.isEscortTarget) {
-    // Escort transport flies steadily along the eastern glacial channel toward destination
-    const goal: Vec3 = [520 + ac.index * 90 - 45, 280, 1450];
-    targetPos = goal;
+    // Escort transport flies steadily toward the extraction waypoint
+    const baseGoal: Vec3 = mission.extractionPos ?? [520, 280, 1450];
+    const laneOffset = (ac.index - 0.5) * 70;
+    const goal: Vec3 = [baseGoal[0] + laneOffset, baseGoal[1], baseGoal[2]];
+    const dGoal = dist3(ac.pos, goal);
+    if (dGoal <= 135) {
+      if (!ac.extracted) {
+        ac.extracted = true;
+        tell(mission, `${ac.name} • Reached extraction zone!`);
+      }
+      const holdAngle = mission.time * 0.45 + ac.index * Math.PI;
+      targetPos = [baseGoal[0] + Math.cos(holdAngle) * 110, baseGoal[1] + 20, baseGoal[2] + Math.sin(holdAngle) * 110];
+    } else {
+      targetPos = goal;
+    }
   } else if (ac.friendly) {
     // Friendly wingman attacks nearest enemy or forms up with player
     let bestEnemy: AircraftEntity | null = null;
@@ -470,8 +507,13 @@ export function stepAircraftAI(
       );
     }
   } else {
-    // Hostile AI: target player or friendly escort/wingman
-    let chosen: AircraftEntity | FlightState = flight;
+    // Hostile AI: target player, friendly escort/wingman, or friendly defense station
+    const friendlyStation =
+      mission.level?.archetype === 'defense'
+        ? mission.groundTargets.find((g) => g.friendly && !g.destroyed)
+        : undefined;
+
+    let chosen: AircraftEntity | FlightState | GroundTarget = flight;
     let bestD = flight.death > 0 ? Infinity : dist3(ac.pos, flight.pos);
     for (const ally of mission.allies) {
       if (ally.hp <= 0) continue;
@@ -481,39 +523,125 @@ export function stepAircraftAI(
         chosen = ally;
       }
     }
+    if (friendlyStation && (ac.index % 2 === 0 || flight.death > 0 || bestD > 520)) {
+      const stationDist = dist3(ac.pos, friendlyStation.pos);
+      if (stationDist < bestD * 1.35 || ac.index % 2 === 0) {
+        chosen = friendlyStation;
+      }
+    }
+
     liveTarget = chosen;
     const offset = ac.index * 1.27 + mission.time * (0.26 + ac.index * 0.015);
-    const orbit: Vec3 =
+    let orbit: Vec3 =
       mission.phase === 'ambush'
         ? [0, 0, -220]
-        : [
-            Math.sin(offset) * (150 + ac.index * 18),
-            Math.cos(offset * 0.8) * 48,
-            Math.cos(offset) * (205 + ac.index * 12),
+        : !isAircraft(chosen) && !('fuel' in chosen)
+          ? [Math.sin(offset) * 165, 78, Math.cos(offset) * 165]
+          : [
+              Math.sin(offset) * (150 + ac.index * 18),
+              Math.cos(offset * 0.8) * 48,
+              Math.cos(offset) * (205 + ac.index * 12),
+            ];
+
+    // Distinct Ace boss flight profiles
+    if (ac.isBoss && ac.bossProfile && ('fuel' in chosen || isAircraft(chosen))) {
+      ac.bossPhaseTimer = (ac.bossPhaseTimer ?? 0) + dt;
+      const dToTarget = dist3(ac.pos, chosen.pos);
+      if (ac.bossProfile === 'joust') {
+        const cycle = ac.bossPhaseTimer % 9;
+        if (cycle < 6 && dToTarget > 210) {
+          orbit = [0, 14, 0];
+          speedMultBonus = 1.28;
+        } else {
+          orbit = [Math.sin(offset * 1.6) * 240, 140, Math.cos(offset * 1.6) * 240];
+          speedMultBonus = 1.12;
+        }
+      } else if (ac.bossProfile === 'stealth') {
+        orbit = [
+          Math.sin(offset * 1.35) * 290,
+          Math.cos(offset * 0.9) * 80,
+          Math.cos(offset * 1.35) * 290,
+        ];
+        speedMultBonus = 1.1;
+      } else if (ac.bossProfile === 'razor') {
+        turnMult = 1.25;
+        speedMultBonus = 1.14;
+        rollExtra = Math.sin(ac.bossPhaseTimer * 3.8) * 0.65;
+        orbit = [
+          Math.sin(ac.bossPhaseTimer * 2.1) * 125,
+          Math.cos(ac.bossPhaseTimer * 1.5) * 45,
+          Math.cos(ac.bossPhaseTimer * 2.1) * 135,
+        ];
+      } else if (ac.bossProfile === 'volley') {
+        orbit = [
+          Math.sin(offset * 0.85) * 320,
+          75 + Math.sin(offset) * 35,
+          Math.cos(offset * 0.85) * 320,
+        ];
+      } else if (ac.bossProfile === 'sovereign') {
+        if (!ac.bossOverdrive && ac.hp <= ac.maxHp * 0.55) {
+          ac.bossOverdrive = true;
+          tell(mission, `${ac.name} • Overdrive engaged!`);
+        }
+        if (ac.bossOverdrive) {
+          turnMult = 1.32;
+          speedMultBonus = 1.24;
+          rollExtra = Math.sin(ac.bossPhaseTimer * 4.4) * 0.72;
+          orbit = [
+            Math.sin(ac.bossPhaseTimer * 2.4) * 140,
+            Math.cos(ac.bossPhaseTimer * 1.7) * 65,
+            Math.cos(ac.bossPhaseTimer * 2.4) * 150,
           ];
+        } else {
+          turnMult = 1.15;
+          speedMultBonus = 1.1;
+          orbit = [
+            Math.sin(offset * 1.2) * 240,
+            Math.cos(offset) * 58,
+            Math.cos(offset * 1.2) * 240,
+          ];
+        }
+      }
+    }
+
     targetPos = add(chosen.pos, orbit);
-    targetSpeed = chosen.speed;
-    targetYaw = chosen.yaw;
-    targetPitch = chosen.pitch;
+    if ('yaw' in chosen && 'speed' in chosen) {
+      targetSpeed = chosen.speed;
+      targetYaw = chosen.yaw;
+      targetPitch = chosen.pitch;
+    } else {
+      targetSpeed = 0;
+      targetYaw = 0;
+      targetPitch = 0;
+    }
   }
 
   // Lead pursuit
   const leadTime = clamp(dist3(ac.pos, targetPos) * 0.0012, 0.1, 0.75);
-  const aimedPos = liveTarget
-    ? add(targetPos, scale(forward(targetYaw, targetPitch), targetSpeed * leadTime))
-    : targetPos;
+  const aimedPos =
+    liveTarget && targetSpeed > 0
+      ? add(targetPos, scale(forward(targetYaw, targetPitch), targetSpeed * leadTime))
+      : targetPos;
   aimedPos[1] = Math.max(aimedPos[1], height(aimedPos[0], aimedPos[2], map) + 72, 92);
 
   const delta = sub(aimedPos, ac.pos);
   const desiredYaw = Math.atan2(delta[0], delta[2]);
   const rawTurn = turnDifference(desiredYaw, ac.yaw);
-  ac.yaw += clamp(rawTurn, -tuning.turnRate * dt, tuning.turnRate * dt);
+  ac.yaw += clamp(rawTurn, -tuning.turnRate * turnMult * dt, tuning.turnRate * turnMult * dt);
   ac.bank = clamp(-rawTurn * 0.85, -0.85, 0.85);
-  ac.roll = ac.bank;
+  ac.roll = ac.bank + rollExtra;
   ac.pitch = clamp(Math.atan2(delta[1], Math.hypot(delta[0], delta[2])), -0.62, 0.74);
   ac.speed = ac.isEscortTarget
-    ? 86
-    : clamp((flight.speed * 0.72 + Math.hypot(delta[0], delta[1], delta[2]) * 0.22) * tuning.speedMult, 86, 210);
+    ? mission.enemies.length === 0
+      ? 118
+      : 72
+    : clamp(
+        (flight.speed * 0.72 + Math.hypot(delta[0], delta[1], delta[2]) * 0.22) *
+          tuning.speedMult *
+          speedMultBonus,
+        86,
+        228
+      );
 
   const proposed = add(ac.pos, scale(forward(ac.yaw, ac.pitch), ac.speed * dt));
   if (solidAt(proposed[0], proposed[1], proposed[2], map, 10)) {
@@ -530,8 +658,13 @@ export function stepAircraftAI(
     const threat = mission.shots.find(
       (s) => s.kind === 'missile' && s.target === ac && dist3(s.pos, ac.pos) < 220
     );
-    if (threat && Math.random() < tuning.flareChance * dt * 6) {
-      ac.flareCooldown = 6.5;
+    const flareRate =
+      ac.bossProfile === 'stealth' || ac.bossProfile === 'volley' || ac.bossOverdrive
+        ? Math.min(0.95, tuning.flareChance * 1.25)
+        : tuning.flareChance;
+    if (threat && Math.random() < flareRate * dt * 6) {
+      ac.flareCooldown =
+        ac.bossProfile === 'volley' || ac.bossProfile === 'stealth' || ac.bossOverdrive ? 4.2 : 6.5;
       threat.target = null;
       threat.life = Math.min(0.6, threat.life);
       spawnEffect(mission, 'flare', ac.pos, [0, -18, 0], 0.7, 5);
@@ -563,7 +696,12 @@ export function stepAircraftAI(
     ac.gunBurst <= 0 &&
     clearPath(ac.pos, liveTarget.pos, map)
   ) {
-    ac.gunBurst = ac.difficulty === 'ace' ? 0.16 : 0.26;
+    ac.gunBurst =
+      ac.bossProfile === 'razor' || ac.bossOverdrive
+        ? 0.11
+        : ac.difficulty === 'ace'
+          ? 0.16
+          : 0.26;
     mission.shots.push({
       kind: ac.friendly ? 'tracer' : 'enemyTracer',
       pos: add(ac.pos, scale(forward(ac.yaw, ac.pitch), 14)),
@@ -587,12 +725,20 @@ export function stepAircraftAI(
     aimDot > 0.9 &&
     clearPath(ac.pos, liveTarget.pos, map)
   ) {
-    const alreadyTargeted =
-      !ac.friendly &&
-      liveTarget === flight &&
-      mission.shots.some((s) => s.kind === 'enemyMissile' && s.target === flight);
+    const activeMissilesOnTarget = mission.shots.filter(
+      (s) => s.kind === 'enemyMissile' && s.target === liveTarget
+    ).length;
+    const maxSimultaneous =
+      ac.bossProfile === 'volley' || (ac.bossProfile === 'sovereign' && ac.bossOverdrive) ? 2 : 1;
+    const alreadyTargeted = !ac.friendly && activeMissilesOnTarget >= maxSimultaneous;
     if (!alreadyTargeted) {
-      ac.fire = tuning.missileCooldown + ac.index * 0.55;
+      const baseCooldown =
+        ac.bossProfile === 'stealth' || ac.bossProfile === 'volley'
+          ? 3.8
+          : ac.bossOverdrive
+            ? 3.4
+            : tuning.missileCooldown;
+      ac.fire = baseCooldown + ac.index * 0.55;
       if (Math.random() <= tuning.missileChance || ac.friendly) {
         ac.missiles--;
         mission.shots.push({
@@ -838,15 +984,41 @@ export function updateShots(
         continue;
       }
       // Hit friendly ally
+      let hitFriendly = false;
       for (const ally of mission.allies) {
         if (ally.hp <= 0) continue;
         if (dist3(shot.pos, ally.pos) < 16) {
           ally.hp -= shot.damage;
           shot.life = 0;
+          hitFriendly = true;
           if (ally.hp <= 0) {
             explosionBurst(mission, ally.pos, true);
             pushKillFeed(mission, `${shot.ownerName ?? 'HOSTILE'} ✕ ${ally.name}`, '#ffb480');
             tell(mission, `${ally.name} DOWN!`);
+          }
+          break;
+        }
+      }
+      if (hitFriendly) continue;
+
+      // Hit defendable friendly ground station
+      for (const gt of mission.groundTargets) {
+        if (!gt.friendly || gt.destroyed) continue;
+        if (dist3(shot.pos, gt.pos) < (shot.kind === 'enemyMissile' ? 26 : 19)) {
+          gt.hp -= shot.damage;
+          shot.life = 0;
+          if (gt.hp <= 0) {
+            gt.destroyed = true;
+            gt.fireCooldown = 0;
+            applyTerrainImpact(gt.pos[0], gt.pos[2], 14, 3, 0.85, map);
+            explosionBurst(mission, gt.pos, true);
+            pushKillFeed(mission, `${shot.ownerName ?? 'HOSTILE'} ✕ ${gt.name}`, '#ff7d6e');
+            tell(mission, `${gt.name.toUpperCase()} DESTROYED!`);
+          } else {
+            spawnEffect(mission, 'spark', shot.pos, [0, 6, 0], 0.16, 7);
+            if (shot.kind === 'enemyMissile') {
+              tell(mission, `RIDGE OPS • ${gt.name} under fire (${Math.round((gt.hp / gt.maxHp) * 100)}%)`);
+            }
           }
           break;
         }

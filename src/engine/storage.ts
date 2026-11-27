@@ -168,3 +168,9 @@ export function isPlaneUnlocked(planeId: number, log: PilotLog): boolean {
   if (req.minTotalKills !== undefined && log.totalKills >= req.minTotalKills) return true;
   return false;
 }
+
+export function findNewlyUnlockedPlanes(before: PilotLog, after: PilotLog): number[] {
+  return planes
+    .filter((p) => !isPlaneUnlocked(p.id, before) && isPlaneUnlocked(p.id, after))
+    .map((p) => p.id);
+}

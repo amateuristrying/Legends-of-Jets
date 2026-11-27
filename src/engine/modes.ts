@@ -28,6 +28,7 @@ import {
 } from './world';
 import {
   acquireTarget,
+  bossProfileForName,
   createAircraft,
   createWeapons,
   explosionBurst,
@@ -94,6 +95,24 @@ function buildCanyonRings(
 }
 
 function buildGroundTargets(level: CampaignLevel): GroundTarget[] {
+  if (level.archetype === 'defense') {
+    const station = RELAYS[0];
+    const sx = station.pos[0];
+    const sz = station.pos[2];
+    return [
+      {
+        id: 'ridge-station',
+        name: station.name,
+        kind: 'relay',
+        pos: [sx, height(sx, sz, level.map) + 8, sz],
+        hp: 260,
+        maxHp: 260,
+        fireCooldown: 99,
+        friendly: true,
+        destroyed: false,
+      },
+    ];
+  }
   const count = level.groundTargets ?? 0;
   const targets: GroundTarget[] = [];
   if (count <= 0) return targets;
@@ -181,10 +200,22 @@ function spawnEnemyWave(
   }
   if (boss) {
     const bPos = add(flight.pos, [0, 55, 680]);
+    const bossProfile = bossProfileForName(boss.name);
+    const bossHp =
+      bossProfile === 'sovereign'
+        ? 380
+        : bossProfile === 'volley'
+          ? 330
+          : bossProfile === 'razor'
+            ? 310
+            : bossProfile === 'stealth'
+              ? 280
+              : 260;
     list.push(
       createAircraft(`boss-${boss.name}`, boss.name, boss.plane, bPos, false, count, 'ace', {
         isBoss: true,
-        hp: 260,
+        bossProfile,
+        hp: bossHp,
       })
     );
   }
@@ -277,6 +308,9 @@ export function createMission(
             { isEscortTarget: isEscort }
           )
         );
+      }
+      if (level.archetype === 'escort') {
+        base.extractionPos = [520, Math.max(280, height(520, 1450, level.map) + 95), 1450];
       }
       base.enemies = spawnEnemyWave(
         flight,
@@ -650,10 +684,20 @@ export function stepMission(
       }
     } else if (mission.phase === 'combat') {
       const activeGround = mission.groundTargets.filter((g) => !g.destroyed && !g.friendly).length;
+      const friendlyStationLost = mission.groundTargets.some((g) => g.friendly && g.destroyed);
       const enemiesClear = mission.enemies.length === 0;
       const groundClear = activeGround === 0;
+      const escortSurvivors = mission.allies.filter((a) => a.isEscortTarget);
+      const escortExtracted =
+        !mission.extractionPos ||
+        escortSurvivors.some(
+          (a) => a.extracted || dist3(a.pos, mission.extractionPos!) <= 140
+        );
 
-      if (lvl.archetype === 'escort' && mission.allies.length === 0) {
+      if (lvl.archetype === 'defense' && friendlyStationLost) {
+        mission.phase = 'failed';
+        tell(mission, 'MISSION FAILED • Ridge Station destroyed');
+      } else if (lvl.archetype === 'escort' && escortSurvivors.length === 0) {
         mission.phase = 'failed';
         tell(mission, 'MISSION FAILED • Escort flight lost');
       } else if (enemiesClear && groundClear) {
@@ -666,6 +710,11 @@ export function stepMission(
             mission.rings = [spawnRearmRing(flight, map)];
           }
           tell(mission, `WAVE ${mission.wave} / ${mission.maxWaves} INBOUND`);
+        } else if (lvl.archetype === 'escort' && !escortExtracted) {
+          if (!mission.triggeredBeats.has('escort-enroute')) {
+            mission.triggeredBeats.add('escort-enroute');
+            tell(mission, 'CARGO-1 • Skies clear! Escorting to extraction waypoint.');
+          }
         } else {
           mission.phase = 'complete';
           mission.rank = computeRank(mission.time, lvl.parTimeSec, hullRatio);

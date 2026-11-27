@@ -38,10 +38,20 @@ import {
   selectRelay,
   stepMission,
 } from './modes';
-import { updateShots } from './combat';
+import {
+  BOSS_PROFILE_LABELS,
+  bossProfileForName,
+  stepAircraftAI,
+  updateShots,
+} from './combat';
 import { Radar } from './radar';
-import { isPlaneUnlocked, DEFAULT_PILOT_LOG } from './storage';
-import type { ControlInput, GroundTarget, TrailSample } from './types';
+import {
+  DEFAULT_PILOT_LOG,
+  findNewlyUnlockedPlanes,
+  isPlaneUnlocked,
+  recordCampaignClear,
+} from './storage';
+import type { CampaignArchetype, ControlInput, GroundTarget, TrailSample } from './types';
 
 const IDLE: ControlInput = {
   turn: 0,
@@ -698,5 +708,159 @@ describe('Legends of Jets v1.0 Engine', () => {
     }
     expect(mission.effects.some((e) => e.kind === 'smoke')).toBe(true);
     resetTerrainDamage();
+  });
+
+  it('defends friendly Ridge Station in Level 3 (defense) and fails if destroyed', () => {
+    const lvl3 = CAMPAIGN_LEVELS.find((l) => l.id === 3)!;
+    const flight = newFlight(0, lvl3.spawnPos);
+    const mission = createMission('story', flight, { levelId: 3 });
+    const station = mission.groundTargets.find((g) => g.friendly);
+    expect(station).toBeDefined();
+    expect(station!.name).toBe('Ridge Station');
+    expect(station!.destroyed).toBe(false);
+
+    // Clearing waves while Ridge Station survives completes the mission
+    mission.enemies = [];
+    stepMission(mission, flight, IDLE, lvl3.map, SIM_STEP);
+    expect(mission.wave).toBe(2);
+    mission.enemies = [];
+    stepMission(mission, flight, IDLE, lvl3.map, SIM_STEP);
+    expect(mission.phase).toBe('complete');
+
+    // If an enemy missile destroys Ridge Station, the mission immediately fails
+    const missionFail = createMission('story', flight, { levelId: 3 });
+    const targetStation = missionFail.groundTargets.find((g) => g.friendly)!;
+    targetStation.hp = 10;
+    missionFail.shots.push({
+      kind: 'enemyMissile',
+      pos: [targetStation.pos[0], targetStation.pos[1], targetStation.pos[2]],
+      velocity: [0, -10, 0],
+      life: 1,
+      size: 5,
+      damage: 36,
+      target: targetStation,
+      ownerName: 'Obsidian-11',
+    });
+    stepMission(missionFail, flight, IDLE, lvl3.map, SIM_STEP);
+    expect(targetStation.destroyed).toBe(true);
+    expect(missionFail.phase).toBe('failed');
+  });
+
+  it('completes Level 9 (escort) when surviving convoy transports reach the extraction waypoint', () => {
+    const lvl9 = CAMPAIGN_LEVELS.find((l) => l.id === 9)!;
+    const flight = newFlight(2, lvl9.spawnPos);
+    const mission = createMission('story', flight, { levelId: 9 });
+    expect(mission.extractionPos).toBeDefined();
+    expect(mission.allies.every((a) => a.isEscortTarget)).toBe(true);
+
+    // Clear both waves while transports are still far from extraction -> stays in combat
+    mission.enemies = [];
+    stepMission(mission, flight, IDLE, lvl9.map, SIM_STEP);
+    expect(mission.wave).toBe(2);
+    mission.enemies = [];
+    stepMission(mission, flight, IDLE, lvl9.map, SIM_STEP);
+    expect(mission.phase).toBe('combat');
+    expect(mission.message).toMatch(/extraction/i);
+
+    // Move surviving transport into extraction zone -> mission completes cleanly
+    mission.allies[0].pos = [...mission.extractionPos!];
+    stepAircraftAI(mission.allies[0], mission, flight, lvl9.map, SIM_STEP);
+    stepMission(mission, flight, IDLE, lvl9.map, SIM_STEP);
+    expect(mission.allies[0].extracted).toBe(true);
+    expect(mission.phase).toBe('complete');
+
+    // Losing all escort transports fails the mission
+    const failMission = createMission('story', flight, { levelId: 9 });
+    failMission.allies = [];
+    stepMission(failMission, flight, IDLE, lvl9.map, SIM_STEP);
+    expect(failMission.phase).toBe('failed');
+  });
+
+  it('gives each Ace boss a distinct behavior profile and overdrive phase', () => {
+    expect(bossProfileForName('CINDER-1')).toBe('joust');
+    expect(bossProfileForName('GLACIER-1')).toBe('stealth');
+    expect(bossProfileForName('PYRE')).toBe('razor');
+    expect(bossProfileForName('SUBZERO')).toBe('volley');
+    expect(bossProfileForName('SOVEREIGN')).toBe('sovereign');
+    expect(Object.keys(BOSS_PROFILE_LABELS)).toHaveLength(5);
+
+    // SOVEREIGN triggers Overdrive below 55% HP
+    const lvl30 = CAMPAIGN_LEVELS.find((l) => l.id === 30)!;
+    const flight = newFlight(4, lvl30.spawnPos);
+    const mission = createMission('story', flight, { levelId: 30 });
+    const boss = mission.enemies.find((e) => e.isBoss)!;
+    expect(boss.name).toBe('SOVEREIGN');
+    expect(boss.bossProfile).toBe('sovereign');
+    expect(boss.bossOverdrive).toBe(false);
+    boss.hp = boss.maxHp * 0.4;
+    stepAircraftAI(boss, mission, flight, lvl30.map, SIM_STEP);
+    expect(boss.bossOverdrive).toBe(true);
+    expect(mission.message).toMatch(/Overdrive/i);
+  });
+
+  it('detects newly unlocked airframes for debrief celebration banners', () => {
+    let log = { ...DEFAULT_PILOT_LOG, campaignProgress: {}, bestTimeTrials: {} };
+    for (let id = 1; id <= 5; id++) {
+      log = recordCampaignClear(log, id, 90, 'A');
+    }
+    expect(findNewlyUnlockedPlanes(DEFAULT_PILOT_LOG, log)).toEqual([]);
+
+    const log6 = recordCampaignClear(log, 6, 95, 'A');
+    expect(findNewlyUnlockedPlanes(log, log6)).toEqual([3]); // Wraith YF-23
+
+    const logKill75 = { ...log6, totalKills: 75 };
+    expect(findNewlyUnlockedPlanes(log6, logKill75)).toEqual([4]); // Valkyrie XV-9
+  });
+
+  it('exercises and completes all 11 campaign archetypes cleanly', () => {
+    const archetypes: CampaignArchetype[] = [
+      'dead-air',
+      'dogfight',
+      'defense',
+      'tunnel',
+      'low-ceiling',
+      'boss',
+      'recon-rings',
+      'escort',
+      'ground-strike',
+      'survival',
+      'relay-blitz',
+    ];
+
+    for (const archetype of archetypes) {
+      const lvl = CAMPAIGN_LEVELS.find((l) => l.archetype === archetype)!;
+      expect(lvl, `Missing level for archetype ${archetype}`).toBeDefined();
+      const flight = newFlight(2, lvl.spawnPos);
+      const mission = createMission('story', flight, { levelId: lvl.id });
+
+      if (archetype === 'dead-air') {
+        for (let i = 0; i < 240; i++) stepMission(mission, flight, IDLE, lvl.map, SIM_STEP);
+        mission.enemies = [];
+        for (let i = 0; i < 280; i++) stepMission(mission, flight, IDLE, lvl.map, SIM_STEP);
+        selectRelay(mission, RELAYS[0].id);
+        flight.pos = relayPosition(RELAYS[0], lvl.map);
+        stepMission(mission, flight, IDLE, lvl.map, SIM_STEP);
+      } else if (archetype === 'low-ceiling' || archetype === 'recon-rings') {
+        expect(mission.phase).toBe('rings');
+        for (const ring of mission.rings) {
+          flight.pos = [...ring.pos];
+          stepMission(mission, flight, IDLE, lvl.map, SIM_STEP);
+        }
+      } else {
+        for (let w = 0; w < mission.maxWaves; w++) {
+          mission.enemies = [];
+          for (const gt of mission.groundTargets) {
+            if (!gt.friendly) gt.destroyed = true;
+          }
+          if (archetype === 'escort' && w === mission.maxWaves - 1 && mission.extractionPos) {
+            mission.allies[0].pos = [...mission.extractionPos];
+            mission.allies[0].extracted = true;
+          }
+          stepMission(mission, flight, IDLE, lvl.map, SIM_STEP);
+        }
+      }
+
+      expect(mission.phase, `Archetype ${archetype} did not complete`).toBe('complete');
+    }
   });
 });

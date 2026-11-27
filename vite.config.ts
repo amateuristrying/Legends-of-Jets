@@ -1,7 +1,9 @@
+import fs from 'node:fs';
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
 export default defineConfig({
+  root: fs.realpathSync(process.cwd()),
   plugins: [react()],
   base: './',
   build: {

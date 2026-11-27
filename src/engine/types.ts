@@ -97,6 +97,8 @@ export interface TrailSample {
   right: Vec3;
 }
 
+export type BossProfile = 'joust' | 'stealth' | 'razor' | 'volley' | 'sovereign';
+
 export interface AircraftEntity {
   id: string;
   name: string;
@@ -111,7 +113,11 @@ export interface AircraftEntity {
   tint: Vec3;
   friendly: boolean;
   isBoss?: boolean;
+  bossProfile?: BossProfile;
+  bossPhaseTimer?: number;
+  bossOverdrive?: boolean;
   isEscortTarget?: boolean;
+  extracted?: boolean;
   index: number;
   hp: number;
   maxHp: number;
@@ -248,6 +254,7 @@ export interface MissionState {
   groundTargets: GroundTarget[];
   rings: RingCheckpoint[];
   nextRingIndex: number;
+  extractionPos?: Vec3;
   shots: ShotEntity[];
   effects: EffectEntity[];
   arms: WeaponsState;

@@ -56,7 +56,7 @@ export interface CrewSnapshot {
     event: number;
     message: string;
   }>;
-  shots: Array<{ kind: 'tracer' | 'missile'; pos: Vec3; size: number; fromTeam: number }>;
+  shots: Array<{ kind: 'tracer' | 'missile' | 'rocket'; pos: Vec3; size: number; fromTeam: number }>;
   effects: Array<{ kind: 'spark' | 'flare'; pos: Vec3; size: number }>;
 }
 
@@ -231,7 +231,7 @@ export class CrewClient {
   }
 
   sendControls(command: ControlInput, now: number): void {
-    for (const flag of ['missile', 'flare', 'roll'] as const) {
+    for (const flag of ['missile', 'rocket', 'flare', 'roll'] as const) {
       this.inputFlags[flag] = Boolean(this.inputFlags[flag] || command[flag]);
     }
     if (now < this.nextInput) return;

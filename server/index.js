@@ -42,7 +42,7 @@ export default {
         const response = await directory.fetch(internal('/room',{ user,body }));
         if (!response.ok) return apply(response);
         const { me,room } = await response.json();
-        const plane = [0,1,2].includes(body.plane) ? body.plane : 0;
+        const plane = [0,1,2,3,4].includes(body.plane) ? body.plane : 0;
         const stub = env.CREW_ROOMS.get(env.CREW_ROOMS.idFromName(room.id));
         return apply(await stub.fetch(internal('/ticket',{ me,room,plane })));
       }

@@ -33,11 +33,12 @@ import { cameraAt, Renderer, type CameraState, type RenderObject, type TrailSamp
 import { interpolateFlight, newFlight, SIM_STEP, stepFlight, views } from './engine/flight';
 import { drawCockpit } from './engine/cockpit';
 import { drawCombatHud, Radar } from './engine/radar';
-import { missileWarning } from './engine/combat';
+import { BOSS_PROFILE_LABELS, missileWarning } from './engine/combat';
 import { CAMPAIGN_LEVELS, getCampaignLevel, RELAYS, relayPosition } from './engine/campaign';
 import { createMission, selectRelay, stepMission } from './engine/modes';
 import { TacticalAudio } from './engine/audio';
 import {
+  findNewlyUnlockedPlanes,
   isPlaneUnlocked,
   loadPilotLog,
   loadSettings,
@@ -99,6 +100,7 @@ interface HudSnapshot {
   crewOutside?: number | null;
   crewConnected: boolean;
   pingMs: number | null;
+  boss: { name: string; hp: number; maxHp: number; profileLabel?: string; overdrive?: boolean } | null;
 }
 
 const INITIAL_HUD: HudSnapshot = {
@@ -132,7 +134,35 @@ const INITIAL_HUD: HudSnapshot = {
   timeLimit: null,
   crewConnected: true,
   pingMs: null,
+  boss: null,
 };
+
+function formatBindingKey(key: string): string {
+  if (key === ' ') return 'Space';
+  if (key === 'shift') return 'Shift';
+  if (key === 'control') return 'Ctrl';
+  if (key.startsWith('arrow')) return key.slice(5).replace(/^\w/, (c) => c.toUpperCase());
+  return key.length === 1 ? key.toUpperCase() : key.replace(/^\w/, (c) => c.toUpperCase());
+}
+
+function buildFlightHelpText(s: GameSettings, hasGamepad: boolean): string {
+  const b = s.bindings;
+  const moveKeys = `${formatBindingKey(b.climb)}${formatBindingKey(b.left)}${formatBindingKey(b.dive)}${formatBindingKey(b.right)}`;
+  const steer = s.mouseAim
+    ? `Mouse-Aim + ${moveKeys} steer`
+    : s.pointer
+      ? `Pointer + ${moveKeys} steer`
+      : hasGamepad
+        ? `Stick / ${moveKeys} fly`
+        : `${moveKeys} fly`;
+  const boost = hasGamepad ? `${formatBindingKey(b.boost)}/RT` : formatBindingKey(b.boost);
+  const brake = hasGamepad ? `${formatBindingKey(b.brake)}/LT` : formatBindingKey(b.brake);
+  const gun = hasGamepad ? `${formatBindingKey(b.gun)}/LMB/A` : `${formatBindingKey(b.gun)}/LMB`;
+  const missile = hasGamepad ? `${formatBindingKey(b.missile)}/B` : formatBindingKey(b.missile);
+  const rocket = hasGamepad ? `${formatBindingKey(b.rocket)}/RMB/RB` : `${formatBindingKey(b.rocket)}/RMB`;
+  const flare = hasGamepad ? `${formatBindingKey(b.flare)}/X` : formatBindingKey(b.flare);
+  return `${steer} · ${boost} boost · ${brake} brake · ${formatBindingKey(b.roll)} roll · ${formatBindingKey(b.view)} view · ${gun} gun · ${missile} missile · ${rocket} rocket · ${flare} flare · ${formatBindingKey(b.map)} map`;
+}
 
 function clearCamera(position: Vec3, desired: Vec3, map: number): Vec3 {
   const offset: Vec3 = [
@@ -173,6 +203,12 @@ export const App: React.FC = () => {
   const [mapVisible, setMapVisible] = useState(true);
   const [viewIndex, setViewIndex] = useState(0);
   const [hud, setHud] = useState<HudSnapshot>(INITIAL_HUD);
+  const [newlyUnlockedPlanes, setNewlyUnlockedPlanes] = useState<number[]>([]);
+  const [hasGamepad, setHasGamepad] = useState<boolean>(() =>
+    typeof navigator !== 'undefined' && navigator.getGamepads
+      ? Array.from(navigator.getGamepads()).some(Boolean)
+      : false
+  );
   const [skirmishCfg, setSkirmishCfg] = useState<SkirmishConfig>({
     map: 0,
     atmosphere: 'day',
@@ -331,22 +367,25 @@ export const App: React.FC = () => {
           ? crewLatestRef.current.pilots.find((p) => p.id === crewIdRef.current)
           : null;
 
-      const crewFuelCap = ownCrew ? (planes[ownCrew.flight.type] ?? planes[0]).fuelCapacity : 240;
+      const ownSpec = ownCrew ? (planes[ownCrew.flight.type] ?? planes[0]) : null;
+      const crewFuelCap = ownSpec ? ownSpec.fuelCapacity : 240;
+      const crewHullCap = ownCrew?.flight.maxHull ?? ownSpec?.hull ?? 100;
       const f = ownCrew
         ? {
             ...ownCrew.flight,
-            maxHull: 100,
-            fuel: crewFuelCap,
-            maxFuel: crewFuelCap,
-            fuelBurnRate: 1,
-            lowFuel: false,
-            flameout: false,
-            stalling: false,
-            gLoad: 1,
+            maxHull: crewHullCap,
+            fuel: ownCrew.flight.fuel ?? crewFuelCap,
+            maxFuel: ownCrew.flight.maxFuel ?? crewFuelCap,
+            fuelBurnRate: ownCrew.flight.fuelBurnRate ?? 1,
+            lowFuel: ownCrew.flight.lowFuel ?? false,
+            flameout: ownCrew.flight.flameout ?? false,
+            stalling: ownCrew.flight.stalling ?? false,
+            gLoad: ownCrew.flight.gLoad ?? 1,
           }
         : newFlight(settingsRef.current.plane, position);
       flightRef.current = f;
       prevFlightRef.current = { ...f, pos: [...f.pos] as Vec3 };
+      setNewlyUnlockedPlanes([]);
 
       const m = createMission(mode, f, {
         levelId: opts?.levelId,
@@ -388,9 +427,25 @@ export const App: React.FC = () => {
     trailRef.current = [];
     lastTrailRef.current = -1;
     resetTerrainDamage();
+    setNewlyUnlockedPlanes([]);
     setScene('hangar');
     if (!keepLobby) crewRef.current?.disconnect();
     setModal(null);
+  }, []);
+
+  useEffect(() => {
+    const syncPad = () => {
+      const connected = Boolean(
+        navigator.getGamepads && Array.from(navigator.getGamepads()).some(Boolean)
+      );
+      setHasGamepad(connected);
+    };
+    window.addEventListener('gamepadconnected', syncPad);
+    window.addEventListener('gamepaddisconnected', syncPad);
+    return () => {
+      window.removeEventListener('gamepadconnected', syncPad);
+      window.removeEventListener('gamepaddisconnected', syncPad);
+    };
   }, []);
 
   // Instantiate Radar when flight HUD mounts #radar and dispose cleanly on hangar return
@@ -736,6 +791,12 @@ export const App: React.FC = () => {
                   const arc = Math.atan2(Math.sin(srv.yaw - f.yaw), Math.cos(srv.yaw - f.yaw));
                   f.yaw += arc * 0.28;
                   f.hull = srv.hull;
+                  f.maxHull = srv.maxHull ?? (planes[f.type]?.hull ?? 100);
+                  f.fuel = srv.fuel ?? f.fuel;
+                  f.maxFuel = srv.maxFuel ?? f.maxFuel;
+                  f.fuelBurnRate = srv.fuelBurnRate ?? f.fuelBurnRate;
+                  f.lowFuel = Boolean(srv.lowFuel);
+                  f.flameout = Boolean(srv.flameout);
                   f.death = srv.death;
                 }
                 crewSyncedRef.current = snap;
@@ -772,7 +833,7 @@ export const App: React.FC = () => {
                     tint: friendly ? ([0.2, 0.72, 0.86] as Vec3) : ([0.86, 0.23, 0.21] as Vec3),
                     index: 0,
                     hp: fp.hull,
-                    maxHp: 100,
+                    maxHp: fp.maxHull ?? (planes[fp.type]?.hull ?? 100),
                     fire: 0,
                     gunBurst: 0,
                     flareCooldown: 0,
@@ -865,6 +926,10 @@ export const App: React.FC = () => {
                     bestSurvivalKills:
                       m.mode === 'survival' ? Math.max(prev.bestSurvivalKills, m.kills) : prev.bestSurvivalKills,
                   };
+                  const unlockedNow = findNewlyUnlockedPlanes(prev, next);
+                  if (unlockedNow.length > 0) {
+                    setNewlyUnlockedPlanes((curr) => Array.from(new Set([...curr, ...unlockedNow])));
+                  }
                   savePilotLog(next);
                   return next;
                 });
@@ -873,9 +938,14 @@ export const App: React.FC = () => {
               if (ev.phaseChanged && (m.phase === 'complete' || m.phase === 'failed')) {
                 if (m.phase === 'complete') {
                   if (m.mode === 'story' && m.levelId) {
-                    setPilotLog((prev) =>
-                      recordCampaignClear(prev, m.levelId!, m.time, m.rank ?? 'A')
-                    );
+                    setPilotLog((prev) => {
+                      const next = recordCampaignClear(prev, m.levelId!, m.time, m.rank ?? 'A');
+                      const unlockedNow = findNewlyUnlockedPlanes(prev, next);
+                      if (unlockedNow.length > 0) {
+                        setNewlyUnlockedPlanes((curr) => Array.from(new Set([...curr, ...unlockedNow])));
+                      }
+                      return next;
+                    });
                   } else if (m.mode === 'timetrial' && m.timeTrialCourse) {
                     const course = m.timeTrialCourse;
                     setPilotLog((prev) => {
@@ -989,6 +1059,15 @@ export const App: React.FC = () => {
           scale: 1,
           size: 3.8,
         });
+        // 3D Escort Extraction Zone beacon (Level 9)
+        if (m.extractionPos) {
+          objects.push({
+            kind: 'rearm',
+            pos: m.extractionPos,
+            scale: 2.2,
+            size: 3.8,
+          });
+        }
         // 3D ground structures (intact or smoking/charred ruins)
         for (const gt of m.groundTargets) {
           objects.push({
@@ -1061,6 +1140,7 @@ export const App: React.FC = () => {
 
           const secs = Math.ceil(m.remaining ?? 0);
           const fuelRatio = f.maxFuel > 0 ? clamp(f.fuel / f.maxFuel, 0, 1) : 0;
+          const activeBoss = m.enemies.find((e) => e.isBoss && e.hp > 0);
           setHud({
             speed: Math.round(f.speed * 3.6),
             altitude: Math.round(f.pos[1]),
@@ -1099,6 +1179,17 @@ export const App: React.FC = () => {
             crewOutside: m.outside,
             crewConnected: crewConnectedRef.current,
             pingMs: crewRef.current?.pingMs ?? null,
+            boss: activeBoss
+              ? {
+                  name: activeBoss.name,
+                  hp: Math.max(0, Math.round(activeBoss.hp)),
+                  maxHp: activeBoss.maxHp,
+                  profileLabel: activeBoss.bossProfile
+                    ? BOSS_PROFILE_LABELS[activeBoss.bossProfile]
+                    : undefined,
+                  overdrive: Boolean(activeBoss.bossOverdrive),
+                }
+              : null,
           });
         }
       } else {
@@ -1393,6 +1484,23 @@ export const App: React.FC = () => {
             </div>
           )}
 
+          {hud.boss && (
+            <div id="boss-hud" className={hud.boss.overdrive ? 'overdrive' : ''}>
+              <div className="boss-head">
+                <span>
+                  ACE · {hud.boss.name}
+                  {hud.boss.profileLabel ? ` (${hud.boss.profileLabel})` : ''}
+                </span>
+                <b>
+                  {hud.boss.hp} / {hud.boss.maxHp}
+                </b>
+              </div>
+              <div className="boss-bar">
+                <i style={{ width: `${clamp((hud.boss.hp / Math.max(1, hud.boss.maxHp)) * 100, 0, 100)}%` }} />
+              </div>
+            </div>
+          )}
+
           {missionRef.current?.mode === 'crew' && (
             <div id="crew-match-hud">
               <div className="crew-match-score">
@@ -1469,7 +1577,10 @@ export const App: React.FC = () => {
           {hud.missileAlert && (
             <div id="missile-warning" role="alert">
               MISSILE INBOUND
-              <span>F FLARE · SHIFT + HARD TURN TO EVADE</span>
+              <span>
+                {formatBindingKey(settings.bindings.flare).toUpperCase()} FLARE ·{' '}
+                {formatBindingKey(settings.bindings.boost).toUpperCase()} + HARD TURN TO EVADE
+              </span>
             </div>
           )}
 
@@ -1491,9 +1602,7 @@ export const App: React.FC = () => {
             </div>
           )}
 
-          <div id="flight-help">
-            WASD fly · Shift boost · B brake · Space view · G/LMB gun · M missile · X/RMB rocket · F flare · R map
-          </div>
+          <div id="flight-help">{buildFlightHelpText(settings, hasGamepad)}</div>
 
           {hud.dead && (
             <div id="respawn">
@@ -1560,6 +1669,7 @@ export const App: React.FC = () => {
         <CrewModal
           crew={crewRef.current!}
           currentPlane={settings.plane}
+          pilotLog={pilotLog}
           onChangePlane={(p) => updateSettings({ plane: p })}
           onActivateAudio={activateAudio}
           onClose={() => setModal(null)}
@@ -1805,9 +1915,7 @@ export const App: React.FC = () => {
             </button>
             <span className="eyebrow">{missionRef.current?.mode.toUpperCase()}</span>
             <h2>Flight Paused</h2>
-            <p>
-              W/S climb/dive · A/D turn · Shift afterburner · B airbrake · E roll · Space view · G/LMB gun · M missile · X/RMB rocket · F flare · R map.
-            </p>
+            <p>{buildFlightHelpText(settings, hasGamepad)}.</p>
             <div className="btn-row">
               <button className="primary" onClick={() => setModal(null)}>
                 Resume Flight
@@ -1847,6 +1955,32 @@ export const App: React.FC = () => {
                 %
               </strong>
             </p>
+            {newlyUnlockedPlanes.length > 0 && (
+              <div className="unlock-banners" role="status">
+                {newlyUnlockedPlanes.map((id) => {
+                  const unlockedPlane = planes[id];
+                  if (!unlockedPlane) return null;
+                  return (
+                    <div key={id} className="unlock-banner">
+                      <div>
+                        <span className="eyebrow">NEW AIRFRAME UNLOCKED · {unlockedPlane.role}</span>
+                        <h3>{unlockedPlane.name}</h3>
+                        <p>{unlockedPlane.description}</p>
+                      </div>
+                      <button
+                        className="primary"
+                        onClick={() => {
+                          updateSettings({ plane: unlockedPlane.id });
+                          showToast(`Equipped ${unlockedPlane.name}`);
+                        }}
+                      >
+                        {settings.plane === unlockedPlane.id ? 'Equipped' : `Equip ${unlockedPlane.name}`}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
             <div className="btn-row">
               {missionRef.current.mode === 'story' &&
                 missionRef.current.phase === 'complete' &&

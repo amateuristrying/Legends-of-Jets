@@ -1,25 +1,47 @@
+import { realpathSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import path from 'node:path';
+import { build } from 'vite';
+import react from '@vitejs/plugin-react';
 
-const project = new URL('./', import.meta.url);
-const dist = new URL('dist/', project);
-const read = file => readFile(new URL(file, dist), 'utf8');
-const moduleNames = ['world', 'volcano', 'renderer', 'flight', 'cockpit', 'mission', 'radar', 'crew', 'game'];
-const scripts = [];
-for (const name of moduleNames) {
-  const exports = [];
-  let source = await read(name + '.js');
-  source = source.replace(/^import\s+\{([^}]+)\}\s+from\s+['"]\.\/(\w+)\.js['"];?$/gm,
-    (_statement, bindings, dependency) => 'const {' + bindings + '} = modules.' + dependency + ';');
-  source = source.replace(/^export (const|function|class) (\w+)/gm,
-    (_statement, kind, symbol) => { exports.push(symbol); return kind + ' ' + symbol; });
-  scripts.push('modules.' + name + ' = (() => {\n' + source +
-    '\nreturn {' + exports.join(', ') + '};\n})();');
+const root = realpathSync(process.cwd());
+const distDir = path.join(root, 'dist');
+const outDir = path.join(root, 'play');
+
+// Build production bundle via Vite JS API with canonical root so junctions/symlinks resolve cleanly
+await build({
+  configFile: false,
+  root,
+  plugins: [react()],
+  base: './',
+  build: {
+    outDir: 'dist',
+    emptyOutDir: true,
+    target: 'es2022',
+  },
+});
+
+let html = await readFile(path.join(distDir, 'index.html'), 'utf8');
+
+// Inline all stylesheet <link rel="stylesheet" ...> tags
+const linkRegex = /<link\b[^>]*rel=["']stylesheet["'][^>]*href=["']([^"']+)["'][^>]*\/?>/gi;
+for (const match of [...html.matchAll(linkRegex)]) {
+  const href = match[1].replace(/^\.\//, '');
+  const css = await readFile(path.join(distDir, href), 'utf8');
+  const cleanCss = css.replace(/^@import[^\n]+\n?/gm, '').replace(/<\/style>/gi, '<\\/style>');
+  html = html.replace(match[0], () => `<style>\n${cleanCss}\n</style>`);
 }
 
-const styles = (await read('style.css')).replace(/^@import[^\n]+\n/gm, '');
-const script = ('const modules = {};\n' + scripts.join('\n')).replace(/<\/(script)/gi, '<\\/$1');
-const html = (await read('index.html'))
-  .replace('<link rel="stylesheet" href="style.css">', () => '<style>\n' + styles + '\n</style>')
-  .replace('<script type="module" src="game.js"></script>', () => '<script type="module">\n' + script + '\n</script>');
-await mkdir(new URL('play/', project), { recursive: true });
-await writeFile(new URL('play/Legends%20of%20Jets.html', project), html);
+// Inline all module <script type="module" ... src="..."> tags
+const scriptRegex = /<script\b[^>]*type=["']module["'][^>]*src=["']([^"']+)["'][^>]*><\/script>/gi;
+for (const match of [...html.matchAll(scriptRegex)]) {
+  const src = match[1].replace(/^\.\//, '');
+  const js = await readFile(path.join(distDir, src), 'utf8');
+  const safeJs = js.replace(/<\/(script)/gi, '<\\/$1');
+  html = html.replace(match[0], () => `<script type="module">\n${safeJs}\n</script>`);
+}
+
+await mkdir(outDir, { recursive: true });
+const outFile = path.join(outDir, 'Legends of Jets.html');
+await writeFile(outFile, html, 'utf8');
+console.log(`Offline build written: ${outFile} (${(Buffer.byteLength(html) / 1024).toFixed(1)} kB)`);

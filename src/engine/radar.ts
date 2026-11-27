@@ -206,6 +206,16 @@ export class Radar {
       ctx.fillRect(gx - 3, gy - 3, 6, 6);
     }
 
+    // Escort extraction zone
+    if (mission.extractionPos) {
+      const [ex, ey] = screen(mission.extractionPos);
+      ctx.strokeStyle = '#6bffb0';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(ex, ey, 6, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
     // Next checkpoint / rearm ring
     for (const ring of mission.rings) {
       if (ring.passed) continue;
@@ -552,6 +562,54 @@ export function drawCombatHud(
         Math.min(x + 9, width - 67),
         y + 3
       );
+    }
+  }
+
+  // Friendly defense station marker (Level 3 Ridge Station)
+  for (const gt of mission.groundTargets) {
+    if (!gt.friendly || gt.destroyed) continue;
+    const d = Math.round(dist3(flight.pos, gt.pos));
+    const hpPct = Math.round(clamp(gt.hp / Math.max(1, gt.maxHp), 0, 1) * 100);
+    const pt = project(gt.pos, camera, width, height);
+    if (pt) {
+      const gx = clamp(pt[0], 22, width - 24);
+      const gy = clamp(pt[1], 22, height - 24);
+      ctx.strokeStyle = '#6fe3ff';
+      ctx.fillStyle = '#6fe3ff';
+      ctx.lineWidth = 1.4;
+      ctx.strokeRect(gx - 8, gy - 8, 16, 16);
+      ctx.fillStyle = '#10242c';
+      ctx.fillRect(gx - 12, gy - 14, 24, 3);
+      ctx.fillStyle = hpPct < 40 ? '#ff6454' : '#6fe3ff';
+      ctx.fillRect(gx - 12, gy - 14, (24 * hpPct) / 100, 3);
+      ctx.font = 'bold 8px monospace';
+      ctx.fillText(`DEFEND ${gt.name.toUpperCase()} · ${hpPct}% · ${d}M`, Math.min(gx + 12, width - 165), gy + 3);
+    } else {
+      drawEdgeArrow(ctx, gt.pos, camera, width, height, '#6fe3ff', 'DEFEND');
+    }
+  }
+
+  // Escort extraction waypoint marker (Level 9 Convoy Escort)
+  if (mission.extractionPos) {
+    const extDist = Math.round(dist3(flight.pos, mission.extractionPos));
+    const extPt = project(mission.extractionPos, camera, width, height);
+    if (extPt) {
+      const ex = clamp(extPt[0], 22, width - 24);
+      const ey = clamp(extPt[1], 22, height - 24);
+      ctx.strokeStyle = '#6bffb0';
+      ctx.fillStyle = '#6bffb0';
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      ctx.moveTo(ex, ey - 7);
+      ctx.lineTo(ex + 7, ey);
+      ctx.lineTo(ex, ey + 7);
+      ctx.lineTo(ex - 7, ey);
+      ctx.closePath();
+      ctx.stroke();
+      ctx.font = 'bold 9px monospace';
+      ctx.fillText(`EXTRACT · ${extDist}M`, Math.min(ex + 10, width - 92), ey + 3);
+    } else {
+      drawEdgeArrow(ctx, mission.extractionPos, camera, width, height, '#6bffb0', 'EXTRACT');
     }
   }
 

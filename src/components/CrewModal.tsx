@@ -1,10 +1,13 @@
 import React, { useEffect, useState } from 'react';
 import { CrewClient, type CrewLobby, type CrewProfile, type CrewRules } from '../engine/crew';
+import { isPlaneUnlocked } from '../engine/storage';
+import type { PilotLog } from '../engine/types';
 import { planes } from '../engine/world';
 
 interface Props {
   crew: CrewClient;
   currentPlane: number;
+  pilotLog: PilotLog;
   onChangePlane: (plane: number) => void;
   onActivateAudio: () => void;
   onClose: () => void;
@@ -13,10 +16,12 @@ interface Props {
 export const CrewModal: React.FC<Props> = ({
   crew,
   currentPlane,
+  pilotLog,
   onChangePlane,
   onActivateAudio,
   onClose,
 }) => {
+  const activeCrewPlane = isPlaneUnlocked(currentPlane, pilotLog) ? currentPlane : 0;
   const [available, setAvailable] = useState<boolean | null>(null);
   const [profile, setProfile] = useState<CrewProfile | null>(null);
   const [lobby, setLobby] = useState<CrewLobby | null>(crew.lobby);
@@ -178,18 +183,24 @@ export const CrewModal: React.FC<Props> = ({
             <div className="row">
               <label>In-Lobby Aircraft</label>
               <div className="segmented">
-                {planes.slice(0, 3).map((p) => (
-                  <button
-                    key={p.id}
-                    className={currentPlane === p.id ? 'active' : ''}
-                    onClick={() => {
-                      onChangePlane(p.id);
-                      runAction(() => crew.switchPlaneInLobby(p.id));
-                    }}
-                  >
-                    {p.name}
-                  </button>
-                ))}
+                {planes.map((p) => {
+                  const unlocked = isPlaneUnlocked(p.id, pilotLog);
+                  return (
+                    <button
+                      key={p.id}
+                      disabled={!unlocked}
+                      title={unlocked ? p.role : `Locked: ${p.unlockRequirement?.label}`}
+                      className={activeCrewPlane === p.id ? 'active' : ''}
+                      onClick={() => {
+                        if (!unlocked) return;
+                        onChangePlane(p.id);
+                        runAction(() => crew.switchPlaneInLobby(p.id));
+                      }}
+                    >
+                      {p.name}
+                    </button>
+                  );
+                })}
               </div>
             </div>
             <ul className="crew-list">
@@ -332,7 +343,7 @@ export const CrewModal: React.FC<Props> = ({
                           runAction(async () => {
                             onActivateAudio();
                             if (room.state === 'invited') await crew.respondRoom(room.id, true);
-                            await crew.connect(room.id, currentPlane % 3);
+                            await crew.connect(room.id, activeCrewPlane);
                           })
                         }
                       >
@@ -420,7 +431,7 @@ export const CrewModal: React.FC<Props> = ({
                 runAction(async () => {
                   onActivateAudio();
                   const { room } = await crew.createRoom(selectedFriends, rules);
-                  await crew.connect(room.id, currentPlane % 3);
+                  await crew.connect(room.id, activeCrewPlane);
                 })
               }
             >
