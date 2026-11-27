@@ -49,6 +49,8 @@ import {
 } from './engine/storage';
 import { CrewClient, type CrewSnapshot } from './engine/crew';
 import { CREW_STEP, CrewPrediction, CrewTimeline, sampleCrewEntities, sampleCrewPilot } from './engine/crew-sync';
+import { Hangar } from './components/Hangar';
+import { GameLoading, useGameMotion } from './components/game-motion';
 import { CampaignModal } from './components/CampaignModal';
 import { CrewModal } from './components/CrewModal';
 import { SettingsModal } from './components/SettingsModal';
@@ -191,6 +193,7 @@ function clearCamera(position: Vec3, desired: Vec3, map: number): Vec3 {
 }
 
 export const App: React.FC = () => {
+  const uiRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<HTMLCanvasElement | null>(null);
   const overlayRef = useRef<HTMLCanvasElement | null>(null);
   const radarCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -200,7 +203,7 @@ export const App: React.FC = () => {
   const [scene, setScene] = useState<'hangar' | 'flight'>('hangar');
   const [modal, setModal] = useState<ModalId>(null);
   const [loading, setLoading] = useState(true);
-  const [loadStatus, setLoadStatus] = useState('Building terrain, caverns & aircraft');
+  const [loadStatus, setLoadStatus] = useState('Preparing terrain and aircraft…');
   const [toastMsg, setToastMsg] = useState<string>('');
   const [mapVisible, setMapVisible] = useState(true);
   const [viewIndex, setViewIndex] = useState(0);
@@ -217,6 +220,8 @@ export const App: React.FC = () => {
     difficulty: 'veteran',
     preset: '2v2',
   });
+
+  useGameMotion(uiRef, scene, modal, loading, settings.plane);
 
   // Mutable simulation refs for zero-overhead 120Hz loop
   const settingsRef = useRef(settings);
@@ -632,12 +637,14 @@ export const App: React.FC = () => {
     if (!canvas || !overlay) return;
     const ctx = overlay.getContext('2d')!;
 
+    const preview = { pos: [50, 630, -650] as Vec3, time: 0 };
     try {
-      const r = new Renderer(canvas);
-      r.prepare(settingsRef.current.map);
-      rendererRef.current = r;
-      setTimeout(() => setLoading(false), 650);
-    } catch (err) {
+      if (!rendererRef.current) {
+        const renderer = new Renderer(canvas);
+        renderer.prepare(settingsRef.current.map, preview.pos[0], preview.pos[2] - 60);
+        rendererRef.current = renderer;
+      }
+    } catch {
       setLoadStatus('WebGL2 could not start. Enable hardware acceleration in your browser.');
       return;
     }
@@ -649,7 +656,9 @@ export const App: React.FC = () => {
     let hudTimer = -1;
     let radarTimer = 0;
     let logAccumulator = 0;
-    const preview = { pos: [50, 630, -650] as Vec3, time: 0 };
+    let drewFirstFrame = false;
+    let overlayVisible = false;
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
     const prevPadButtons = { missile: false, rocket: false, flare: false, roll: false, view: false };
 
     const sampleInput = (): ControlInput => {
@@ -739,6 +748,9 @@ export const App: React.FC = () => {
     };
 
     const frame = (timestamp: number) => {
+      rafId = requestAnimationFrame(frame);
+      const inHangar = sceneStateRef.current === 'hangar';
+      if (inHangar && modalRef.current && lastTime !== undefined && timestamp - lastTime < 32) return;
       const dt = lastTime === undefined ? 0 : Math.min(0.1, (timestamp - lastTime) / 1000);
       lastTime = timestamp;
       const time = timestamp / 1000;
@@ -1171,22 +1183,26 @@ export const App: React.FC = () => {
         }
       } else {
         // Hangar live autopilot preview
-        preview.time += dt;
+        const previewStep = reducedMotion.matches ? 0 : dt;
+        preview.time += previewStep;
         const yaw = 0.12 + Math.sin(preview.time * 0.075) * 0.47;
         const bank = Math.cos(preview.time * 0.075) * -0.32;
         const nose = forward(yaw);
-        preview.pos = add(preview.pos, scale(nose, 112 * dt));
+        preview.pos = add(preview.pos, scale(nose, 112 * previewStep));
         preview.pos[1] = 630 + Math.sin(preview.time * 0.095) * 27;
         const side: Vec3 = [nose[2], 0, -nose[0]];
-        const dist = innerWidth / innerHeight < 0.8 ? 1.55 : 1;
+        const aspect = innerWidth / innerHeight;
+        const dist = aspect < 0.85 ? 1.45 : 1;
         const eye = add(
           preview.pos,
           scale(add(add(scale(side, 25), scale(nose, -56)), [0, 23, 0]), dist)
         );
-        camera = cameraAt(eye, add(preview.pos, [0, -2, 0]), bank * 0.16, 0.56);
+        const framing = aspect >= 1.15 ? add(scale(side, -19), [0, -4, 0]) : [0, -4, 0] as Vec3;
+        camera = cameraAt(eye, add(preview.pos, framing), bank * 0.16, 0.56);
         objects = [{ type: settingsRef.current.plane, pos: preview.pos, yaw, roll: bank, pitch: 0 }];
       }
 
+      const worldTime = inHangar ? (reducedMotion.matches ? preview.time : time) : simTimeRef.current;
       r.render(
         camera,
         {
@@ -1194,7 +1210,7 @@ export const App: React.FC = () => {
           atmosphere: curAtmo,
           night: curAtmo === 'night' || curAtmo === 'aurora' || settingsRef.current.night,
         },
-        sceneStateRef.current === 'flight' ? simTimeRef.current : time,
+        worldTime,
         objects,
         allTrails,
         settingsRef.current.quality
@@ -1204,7 +1220,9 @@ export const App: React.FC = () => {
         overlay.width = canvas.width;
         overlay.height = canvas.height;
       }
-      ctx.clearRect(0, 0, overlay.width, overlay.height);
+      const needsOverlay = Boolean(pose) || curAtmo === 'storm';
+      if (needsOverlay || overlayVisible) ctx.clearRect(0, 0, overlay.width, overlay.height);
+      overlayVisible = needsOverlay;
 
       // Storm rain/snow streaks overlay
       if (curAtmo === 'storm') {
@@ -1212,8 +1230,8 @@ export const App: React.FC = () => {
         ctx.lineWidth = 1;
         ctx.beginPath();
         for (let i = 0; i < 42; i++) {
-          const rx = ((i * 97 + time * 420) % overlay.width);
-          const ry = ((i * 53 + time * 580) % overlay.height);
+          const rx = (i * 97 + worldTime * 420) % overlay.width;
+          const ry = (i * 53 + worldTime * 580) % overlay.height;
           ctx.moveTo(rx, ry);
           ctx.lineTo(rx - 4, ry + 11);
         }
@@ -1270,7 +1288,10 @@ export const App: React.FC = () => {
         }
       );
 
-      rafId = requestAnimationFrame(frame);
+      if (!drewFirstFrame) {
+        drewFirstFrame = true;
+        setLoading(false);
+      }
     };
 
     rafId = requestAnimationFrame(frame);
@@ -1281,109 +1302,26 @@ export const App: React.FC = () => {
   const currentMapSpec = maps[settings.map] ?? maps[0];
 
   return (
-    <>
+    <div ref={uiRef}>
       <canvas id="scene" ref={sceneRef} aria-label="Flight world" />
       <canvas id="overlay" ref={overlayRef} aria-hidden="true" />
-
-      {loading && (
-        <div id="loading">
-          <div className="brand">
-            LEGENDS <span>OF</span> JETS
-          </div>
-          <p>PREPARING YOUR FLIGHT</p>
-          <div className="loadtrack">
-            <i />
-          </div>
-          <small style={{ color: '#8a9daa', fontSize: 12 }}>{loadStatus}</small>
-        </div>
-      )}
+      <GameLoading ready={!loading} status={loadStatus} />
 
       {scene === 'hangar' && (
-        <main id="hangar">
-          <header>
-            <a className="brand" href="#top" onClick={(e) => e.preventDefault()}>
-              LEGENDS <span>OF</span> JETS
-            </a>
-            <nav>
-              <button onClick={() => setModal('pilotlog')}>Pilot Log</button>
-              <button onClick={() => setModal('maps')}>Maps</button>
-              <button onClick={() => setModal('planes')}>Planes (5)</button>
-              <button onClick={() => setModal('settings')}>Settings</button>
-              <span className="divider">|</span>
-              <button
-                onClick={() =>
-                  window.open(settings.repository, '_blank', 'noopener,noreferrer')
-                }
-              >
-                GitHub
-              </button>
-            </nav>
-          </header>
-
-          <section className="hangar-caption">
-            <span className="eyebrow">V1.0 · REACT + TYPESCRIPT + WEBGL2</span>
-            <h1>
-              Choose your
-              <br />
-              flight.
-            </h1>
-          </section>
-
-          <section className="aircraft-caption">
-            <span className="eyebrow">SELECTED AIRCRAFT</span>
-            <h2>{currentPlaneSpec.name}</h2>
-            <button onClick={() => setModal('planes')}>
-              Change aircraft <span>+</span>
-            </button>
-          </section>
-
-          <div className="mode-dock">
-            <button className="mode" onClick={() => setModal('campaign')}>
-              <span>30 LEVELS · 5 ACTS</span>
-              <strong>Campaign</strong>
-              <small>STORY OPERATIONS</small>
-            </button>
-            <button className="mode" onClick={() => setModal('skirmish')}>
-              <span>OFFLINE BOTS</span>
-              <strong>Skirmish</strong>
-              <small>1V1 · 2V2 · 3V3</small>
-            </button>
-            <button className="mode" onClick={() => setModal('timetrial')}>
-              <span>RING COURSES</span>
-              <strong>Time Trials</strong>
-              <small>CALDERA &amp; GLACIER</small>
-            </button>
-            <button className="mode" onClick={() => launchMode('survival')}>
-              <span>ENDLESS WAVES</span>
-              <strong>Survival</strong>
-              <small>REARM RINGS &amp; ACES</small>
-            </button>
-            <button className="mode" onClick={() => setModal('crew')}>
-              <span>ONLINE SQUADRON</span>
-              <strong>Crew</strong>
-              <small>DUELS &amp; CO-OP</small>
-            </button>
-            <button className="mode endless" onClick={() => launchMode('endless')}>
-              <span>FREE FLIGHT</span>
-              <strong>
-                Endless <i>✦</i>
-              </strong>
-              <small>PLAY NOW</small>
-            </button>
-          </div>
-
-          <footer>
-            <span>
-              {currentMapSpec.name.toUpperCase()} / {settings.atmosphere.toUpperCase()} ·{' '}
-              {settings.flightModel.toUpperCase()}
-            </span>
-            <span>AUTOPILOT PREVIEW · GAMEPAD READY</span>
-          </footer>
-        </main>
+        <Hangar
+          aircraft={currentPlaneSpec.name}
+          aircraftRole={currentPlaneSpec.role}
+          map={currentMapSpec.name}
+          atmosphere={settings.atmosphere}
+          repository={settings.repository}
+          inactive={loading || Boolean(modal)}
+          open={setModal}
+          launch={launchMode}
+        />
       )}
 
       {scene === 'flight' && (
-        <section id="hud">
+        <section id="hud" inert={Boolean(modal)}>
           <div className="hud-top">
             <div className="brand">
               LEGENDS <span>OF</span> JETS
@@ -2050,6 +1988,6 @@ export const App: React.FC = () => {
           {toastMsg}
         </div>
       )}
-    </>
+    </div>
   );
 };

@@ -16,6 +16,7 @@ import {
   planes,
   sampleElevationRGRect,
   sampleElevationRGWindow,
+  shiftElevationRGWindow,
   scale,
   sub,
   TERRAIN_GRID,
@@ -709,7 +710,7 @@ function visibleBounds(
 }
 
 interface BufferHandle {
-  buffer: WebGLBuffer;
+  vao: WebGLVertexArrayObject;
   count: number;
 }
 
@@ -767,7 +768,7 @@ export class Renderer {
   >;
   trailBuffer: WebGLBuffer;
   trailData: Float32Array;
-  landmarkGpuChunks: Map<number, Map<string, LandmarkChunkGpu>>;
+  landmarkGpuChunks: Map<number, { source: LandmarkChunk[]; handles: Map<string, LandmarkChunkGpu> }>;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -879,9 +880,16 @@ export class Renderer {
   buffer(data: Float32Array): BufferHandle {
     const gl = this.gl;
     const buffer = gl.createBuffer()!;
+    const vao = gl.createVertexArray()!;
+    gl.bindVertexArray(vao);
     gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
     gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
-    return { buffer, count: data.length / 6 };
+    gl.enableVertexAttribArray(this.pointPosition);
+    gl.vertexAttribPointer(this.pointPosition, 3, gl.FLOAT, false, 24, 0);
+    gl.enableVertexAttribArray(this.pointColor);
+    gl.vertexAttribPointer(this.pointColor, 3, gl.FLOAT, false, 24, 12);
+    gl.bindVertexArray(null);
+    return { vao, count: data.length / 6 };
   }
 
   uniform(prog: WebGLProgram, name: string, value: number | Vec3 | [number, number]): void {
@@ -962,7 +970,11 @@ export class Renderer {
     }
 
     if (existing.originX !== originX || existing.originZ !== originZ) {
-      sampleElevationRGWindow(map, originX, originZ, ELEVATION_TEXELS, ELEVATION_STEP, existing.buffer);
+      if (existing.revision === rev) {
+        shiftElevationRGWindow(map, existing.buffer, existing.originX, existing.originZ, originX, originZ);
+      } else {
+        sampleElevationRGWindow(map, originX, originZ, ELEVATION_TEXELS, ELEVATION_STEP, existing.buffer);
+      }
       consumeTerrainDirty(map);
       existing.originX = originX;
       existing.originZ = originZ;
@@ -1082,11 +1094,10 @@ export class Renderer {
   private syncLandmarkChunks(map: number): Map<string, LandmarkChunkGpu> {
     const m = map === 1 ? 1 : 0;
     const chunks = getLandmarkChunks(m);
-    let gpuMap = this.landmarkGpuChunks.get(m);
-    if (!gpuMap) {
-      gpuMap = new Map();
-      this.landmarkGpuChunks.set(m, gpuMap);
-    }
+    const cached = this.landmarkGpuChunks.get(m);
+    if (cached?.source === chunks) return cached.handles;
+    const gpuMap = cached?.handles ?? new Map<string, LandmarkChunkGpu>();
+    this.landmarkGpuChunks.set(m, { source: chunks, handles: gpuMap });
     const gl = this.gl;
     const activeKeys = new Set<string>();
     for (const chunk of chunks) {
@@ -1117,8 +1128,8 @@ export class Renderer {
     return gpuMap;
   }
 
-  prepare(map: number): void {
-    this.elevationTexture(map);
+  prepare(map: number, eyeX = 0, eyeZ = 0): void {
+    this.elevationTexture(map, eyeX, eyeZ);
     this.syncLandmarkChunks(map);
   }
 
@@ -1229,18 +1240,6 @@ export class Renderer {
     }
   }
 
-  pointAttributes(buffer: WebGLBuffer): void {
-    const gl = this.gl;
-    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-    for (const [location, offset] of [
-      [this.pointPosition, 0],
-      [this.pointColor, 12],
-    ]) {
-      gl.enableVertexAttribArray(location);
-      gl.vertexAttribPointer(location, 3, gl.FLOAT, false, 24, offset);
-    }
-  }
-
   drawTrail(trail: TrailSample[], time: number): void {
     if (trail.length < 2) return;
     const gl = this.gl;
@@ -1302,7 +1301,7 @@ export class Renderer {
       tint: object.tint ?? [0, 0, 0],
     };
     for (const [name, value] of Object.entries(values)) this.uniform(this.points, name, value);
-    this.pointAttributes(model.buffer);
+    gl.bindVertexArray(model.vao);
     gl.drawArrays(gl.POINTS, 0, model.count);
   }
 }

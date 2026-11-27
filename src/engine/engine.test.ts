@@ -16,6 +16,7 @@ import {
   resetTerrainDamage,
   sampleElevationRGWindow,
   sampleElevationWindow,
+  shiftElevationRGWindow,
   scorchAt,
   solidAt,
   TERRAIN_SIZE,
@@ -67,6 +68,23 @@ const IDLE: ControlInput = {
 };
 
 describe('Legends of Jets v1.0 Engine', () => {
+  it('keeps shifted terrain windows identical to fresh samples across both maps', () => {
+    const texels = 64;
+    const shifts = [[128, 0], [-128, 128], [-128, -128], [0, -128], [0, 0], [1024, 0]];
+    for (const map of [0, 1]) {
+      let x = -256;
+      let z = -256;
+      const pixels = sampleElevationRGWindow(map, x, z, texels);
+      for (const [dx, dz] of shifts) {
+        shiftElevationRGWindow(map, pixels, x, z, x + dx, z + dz, texels);
+        x += dx;
+        z += dz;
+        const fresh = sampleElevationRGWindow(map, x, z, texels);
+        expect(pixels.every((value, index) => value === fresh[index])).toBe(true);
+      }
+    }
+  });
+
   it('defines 5 distinct airframes with unique loadouts and unlock progression', () => {
     expect(planes).toHaveLength(5);
     expect(isPlaneUnlocked(0, DEFAULT_PILOT_LOG)).toBe(true);

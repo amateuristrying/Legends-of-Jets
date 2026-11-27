@@ -719,6 +719,44 @@ export function sampleElevationWindow(
   return buf;
 }
 
+function writeAlignedElevation(
+  map: number,
+  originX: number,
+  originZ: number,
+  width: number,
+  depth: number,
+  buffer: Uint8Array,
+  stride = width,
+  offset = 0
+): void {
+  const startX = originX / CHUNK_SIZE;
+  const startZ = originZ / CHUNK_SIZE;
+  for (let dz = 0; dz < depth / CHUNK_CELLS; dz++) {
+    for (let dx = 0; dx < width / CHUNK_CELLS; dx++) {
+      const cx = startX + dx;
+      const cz = startZ + dz;
+      const key = `${cx},${cz}`;
+      const base = getTerrainChunk(map, cx, cz);
+      const deform = deformCaches[map].get(key);
+      const scorch = scorchCaches[map].get(key);
+      for (let row = 0; row < CHUNK_CELLS; row++) {
+        let dst = offset + ((dz * CHUNK_CELLS + row) * stride + dx * CHUNK_CELLS) * 2;
+        let source = row * CHUNK_CELLS;
+        for (let col = 0; col < CHUNK_CELLS; col++, source++) {
+          let elevation = base[source];
+          if (deform && deform[source] > 0) {
+            const rawHeight = (elevation * TERRAIN_HEIGHT) / 255;
+            const baseHeight = Math.max(10, Math.floor(rawHeight / 4) * 4);
+            elevation = Math.round((Math.max(10, baseHeight - deform[source]) * 255) / TERRAIN_HEIGHT);
+          }
+          buffer[dst++] = elevation;
+          buffer[dst++] = scorch ? scorch[source] : 0;
+        }
+      }
+    }
+  }
+}
+
 export function sampleElevationRGWindow(
   map: number,
   originX: number,
@@ -735,38 +773,7 @@ export function sampleElevationRGWindow(
     originZ % CHUNK_SIZE === 0 &&
     texels % CHUNK_CELLS === 0
   ) {
-    const chunksPerSide = texels / CHUNK_CELLS;
-    const startCx = originX / CHUNK_SIZE;
-    const startCz = originZ / CHUNK_SIZE;
-    for (let czOff = 0; czOff < chunksPerSide; czOff++) {
-      const baseRow = czOff * CHUNK_CELLS;
-      for (let cxOff = 0; cxOff < chunksPerSide; cxOff++) {
-        const cx = startCx + cxOff;
-        const cz = startCz + czOff;
-        const key = `${cx},${cz}`;
-        const baseChunk = getTerrainChunk(m, cx, cz);
-        const deformChunk = deformCaches[m].get(key);
-        const scorchChunk = scorchCaches[m].get(key);
-        const baseCol = cxOff * CHUNK_CELLS;
-        for (let lz = 0; lz < CHUNK_CELLS; lz++) {
-          const rowDst = ((baseRow + lz) * texels + baseCol) * 2;
-          const rowSrc = lz * CHUNK_CELLS;
-          for (let lx = 0; lx < CHUNK_CELLS; lx++) {
-            const idx = rowSrc + lx;
-            let elevByte = baseChunk[idx];
-            if (deformChunk && deformChunk[idx] > 0) {
-              const rawH = (elevByte * TERRAIN_HEIGHT) / 255;
-              const baseH = Math.max(10, Math.floor(rawH / 4) * 4);
-              elevByte = Math.round(
-                (clamp(Math.max(10, baseH - deformChunk[idx]), 0, TERRAIN_HEIGHT) * 255) / TERRAIN_HEIGHT
-              );
-            }
-            buf[rowDst + lx * 2] = elevByte;
-            buf[rowDst + lx * 2 + 1] = scorchChunk ? scorchChunk[idx] : 0;
-          }
-        }
-      }
-    }
+    writeAlignedElevation(m, originX, originZ, texels, texels, buf);
     return buf;
   }
   for (let row = 0; row < texels; row++) {
@@ -779,6 +786,50 @@ export function sampleElevationRGWindow(
     }
   }
   return buf;
+}
+
+export function shiftElevationRGWindow(
+  map: number,
+  buffer: Uint8Array,
+  oldX: number,
+  oldZ: number,
+  originX: number,
+  originZ: number,
+  texels = ELEVATION_TEXELS
+): void {
+  const dx = (originX - oldX) / TERRAIN_GRID;
+  const dz = (originZ - oldZ) / TERRAIN_GRID;
+  if (originX % CHUNK_SIZE || originZ % CHUNK_SIZE || texels % CHUNK_CELLS ||
+      dx % CHUNK_CELLS || dz % CHUNK_CELLS || Math.abs(dx) >= texels || Math.abs(dz) >= texels) {
+    sampleElevationRGWindow(map, originX, originZ, texels, TERRAIN_GRID, buffer);
+    return;
+  }
+
+  const left = Math.max(0, -dx);
+  const top = Math.max(0, -dz);
+  const width = texels - Math.abs(dx);
+  const depth = texels - Math.abs(dz);
+  const stride = texels * 2;
+  // Copy in the direction that preserves any source rows still needed in this buffer.
+  for (let i = 0; i < depth; i++) {
+    const row = top + (dz < 0 ? depth - 1 - i : i);
+    const dest = row * stride + left * 2;
+    const source = dest + dz * stride + dx * 2;
+    buffer.copyWithin(dest, source, source + width * 2);
+  }
+  const m = mapIndex(map);
+  const newCols = Math.abs(dx);
+  const newRows = Math.abs(dz);
+  if (newCols) {
+    const col = dx < 0 ? 0 : width;
+    writeAlignedElevation(m, originX + col * TERRAIN_GRID, originZ + top * TERRAIN_GRID,
+      newCols, depth, buffer, texels, top * stride + col * 2);
+  }
+  if (newRows) {
+    const row = dz < 0 ? 0 : depth;
+    writeAlignedElevation(m, originX, originZ + row * TERRAIN_GRID, texels,
+      newRows, buffer, texels, row * stride);
+  }
 }
 
 export function sampleElevationRGRect(

@@ -56,241 +56,322 @@ canvas#overlay {
   pointer-events: none;
 }
 
-/* Hangar */
-#hangar {
-  position: fixed;
-  inset: 0;
-  background: linear-gradient(90deg, #0b182bcc, transparent 66%),
-    linear-gradient(0deg, #0a1524eb, transparent 44%);
-}
-
-header {
-  position: absolute;
-  left: 4.5%;
-  right: 4.5%;
-  top: 4%;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
 .brand {
-  font-family: 'Barlow Condensed', Impact, sans-serif;
-  font-size: 28px;
-  font-weight: 700;
-  letter-spacing: 1.4px;
-  text-decoration: none;
-  color: #fff;
+  font: 700 28px/.95 'Barlow Condensed', Impact, sans-serif;
+  letter-spacing: 0.065em;
+  color: #fff4e7;
 }
 
-.brand span {
-  font-size: 0.6em;
+.brand > span:not(.deck-wordmark) {
+  font-size: 0.65em;
   font-weight: 500;
 }
 
 .brand small {
   display: block;
-  font-family: Barlow, sans-serif;
-  letter-spacing: 3px;
-  font-size: 10px;
-  margin-top: 6px;
-  color: #b4bcc3;
-  font-weight: 500;
-}
-
-nav {
-  display: flex;
-  align-items: center;
-  gap: 22px;
-  flex-wrap: wrap;
-}
-
-nav button {
-  font-size: 14px;
-  display: flex;
-  gap: 8px;
-  align-items: center;
-}
-
-.divider {
-  color: #82919d;
-}
-
-.hangar-caption {
-  position: absolute;
-  top: 23%;
-  left: 6%;
+  margin-top: 8px;
+  font: 600 10px/1.2 Barlow, sans-serif;
+  letter-spacing: 0.21em;
+  color: #b4c6d0;
 }
 
 .eyebrow {
+  color: #ffab87;
   font-size: 11px;
-  letter-spacing: 3px;
-  color: #f99a72;
   font-weight: 600;
+  letter-spacing: 0.18em;
   text-transform: uppercase;
-}
-
-h1 {
-  font-family: 'Barlow Condensed', Impact, sans-serif;
-  font-weight: 600;
-  text-transform: uppercase;
-  font-size: clamp(44px, 5vw, 84px);
-  line-height: 0.98;
-  letter-spacing: 0.6px;
-  margin: 16px 0 10px;
 }
 
 p {
-  color: #bac7cf;
+  color: #bdcad3;
   font-size: 15px;
   line-height: 1.55;
 }
 
-.aircraft-caption {
-  position: absolute;
-  right: 6%;
-  top: 46%;
-  text-align: right;
+#hangar {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  padding: clamp(20px, 4.2vh, 52px) clamp(20px, 5vw, 104px) clamp(14px, 3vh, 34px);
+  overflow: auto;
+  background:
+    linear-gradient(0deg, #0a121d 1%, #0a1423ef 13%, #0b15216e 30%, transparent 55%),
+    linear-gradient(90deg, #091420e8, #0d182779 38%, transparent 71%),
+    linear-gradient(180deg, #0a1524ab, transparent 28%);
 }
 
-.aircraft-caption h2 {
-  font-family: 'Barlow Condensed', sans-serif;
-  font-size: 32px;
+.deck-header,
+.deck-footer {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.deck-header {
+  padding-bottom: 17px;
+  border-bottom: 1px solid #d4e8f736;
+}
+
+.deck-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 11px;
+  white-space: nowrap;
+}
+
+.deck-wordmark em {
+  color: #ffc09e;
+  font-size: 0.66em;
   font-weight: 600;
-  margin: 8px 0;
+  font-style: normal;
+}
+
+.deck-mark {
+  display: inline-block;
+  width: 27px;
+  height: 22px;
+  flex: 0 0 auto;
+  background: #ff976e;
+  clip-path: polygon(0 36%, 49% 0, 100% 36%, 100% 61%, 49% 25%, 0 61%, 0 72%, 49% 37%, 100% 73%, 100% 100%, 49% 64%, 0 100%);
+}
+
+.deck-header nav {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px clamp(10px, 1.6vw, 28px);
+  justify-content: flex-end;
+}
+
+.deck-header nav button,
+.deck-header nav a {
+  padding: 5px 0;
+  color: #e2edf2;
+  font-size: 14px;
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.deck-header nav button:hover,
+.deck-header nav a:hover,
+.deck-footer button:hover {
+  color: #ffab87;
+}
+
+.deck-header nav a span,
+.divider {
+  color: #acbfc9;
+}
+
+.deck-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 20px;
+  min-height: 0;
+  padding: 10px 0 32px;
+}
+
+.hangar-caption h1 {
+  margin: 0;
+  color: #fff1e2;
+  font: 700 clamp(68px, 9vw, 155px)/0.83 'Barlow Condensed', Impact, sans-serif;
+  letter-spacing: -0.02em;
+  text-transform: uppercase;
+  text-shadow: 0 4px 28px #02070c45;
+}
+
+.hangar-caption h1 span {
+  color: #ffac84;
+}
+
+.aircraft-caption {
+  align-self: end;
+  min-width: 180px;
+  padding: 14px 0 3px 16px;
+  border-left: 1px solid #fac09e93;
+  text-align: left;
+  text-shadow: 0 1px 15px #02070c;
 }
 
 .aircraft-caption .eyebrow {
-  color: #c3cbd1;
+  color: #e3e9ea;
   font-size: 10px;
 }
 
+.aircraft-caption h2 {
+  margin: 3px 0 9px;
+  font: 600 clamp(28px, 2.9vw, 45px)/0.95 'Barlow Condensed', Impact, sans-serif;
+}
+
 .aircraft-caption button {
+  padding: 3px 0;
+  color: #ecf3f5;
   font-size: 13px;
-  color: #c5ced5;
+  font-weight: 600;
 }
 
 .aircraft-caption button span {
-  margin-left: 14px;
-  color: var(--orange);
+  margin-left: 7px;
+  color: #ffac84;
 }
 
 .mode-dock {
-  position: absolute;
-  bottom: 10%;
-  left: 5%;
-  right: 5%;
   display: grid;
-  grid-template-columns: repeat(6, 1fr);
-  border: 1px solid var(--line);
-  background: #12212cb0;
-  backdrop-filter: blur(14px);
+  grid-template-columns: repeat(5, minmax(0, 1fr)) minmax(0, 1.14fr);
+  border: 1px solid #93b9d047;
+  background: #101d29f0;
 }
 
 .mode {
+  position: relative;
+  min-height: 103px;
+  padding: 16px 24px 17px clamp(12px, 1.45vw, 26px);
+  border-right: 1px solid #93b9d038;
+  color: #f2f0e9;
   text-align: left;
-  padding: 18px 20px;
-  border-right: 1px solid var(--line);
-  transition: background 0.18s;
+  transition: color 0.16s, background-color 0.16s;
 }
 
 .mode:last-child {
   border-right: 0;
 }
 
-.mode span,
+.mode strong,
 .mode small {
   display: block;
-  font-size: 9px;
-  letter-spacing: 2px;
-  color: #a5b5c3;
 }
 
 .mode strong {
-  display: block;
-  font-family: 'Barlow Condensed', sans-serif;
-  font-size: 28px;
-  font-weight: 600;
-  margin: 8px 0;
+  margin-bottom: 6px;
+  font: 600 clamp(22px, 2.4vw, 35px)/1 'Barlow Condensed', Impact, sans-serif;
 }
 
-.mode:hover {
-  background: #ffffff0e;
+.mode small {
+  color: #b0c2cd;
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.mode-arrow {
+  position: absolute;
+  right: 10px;
+  top: 10px;
+  color: #8499a9;
+  font-size: 14px;
+  line-height: 1;
+  transition: transform 0.18s, color 0.18s;
+}
+
+.mode:hover,
+.mode:focus-visible {
+  z-index: 1;
+  background: #22364a;
+  color: #fff4e7;
+}
+
+.mode:hover .mode-arrow,
+.mode:focus-visible .mode-arrow {
+  color: #ffc4a8;
+  transform: translate(2px, -2px);
 }
 
 .mode.endless {
-  background: #f17a50;
-  color: #16212a;
+  background: #ff9d76;
+  color: #241c1c;
 }
 
-.mode.endless span,
-.mode.endless small {
-  color: #4e332c;
+.mode.endless small,
+.mode.endless .mode-arrow {
+  color: #502b25;
 }
 
-.mode.endless:hover {
-  background: #ff9165;
-  color: #16212a;
+.mode.endless:hover,
+.mode.endless:focus-visible {
+  background: #ffba9b;
+  color: #201719;
 }
 
-.mode i {
-  float: right;
-  font-style: normal;
+.deck-footer {
+  padding-top: 13px;
+  color: #adbfce;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
 }
 
-footer {
-  position: absolute;
-  bottom: 3.5%;
-  left: 5%;
-  right: 5%;
+.deck-footer button {
+  padding: 4px 0;
+  color: #e9eef2;
+  text-transform: inherit;
+  letter-spacing: inherit;
+}
+
+.deck-footer button span {
+  color: #adbfce;
+}
+
+.preview-status {
   display: flex;
-  justify-content: space-between;
-  font-size: 10px;
-  letter-spacing: 1.7px;
-  color: #9caebb;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
 }
 
-/* Loading screen */
+.preview-status i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #9de4d5;
+  box-shadow: 0 0 9px #66e0cb76;
+}
+
 #loading {
   position: fixed;
   inset: 0;
-  background: #0b151f;
   z-index: 30;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-direction: column;
-  transition: opacity 0.5s;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 14px;
+  padding: 25px;
+  text-align: center;
+  background: radial-gradient(ellipse at 50% 40%, #1a2c3c 0%, #0b141f 60%);
+}
+
+#loading .deck-mark {
+  width: 35px;
+  height: 27px;
 }
 
 #loading p {
-  font-size: 11px;
-  letter-spacing: 3px;
-  margin-top: 38px;
+  margin: 12px 0 4px;
 }
 
 .loadtrack {
-  width: 240px;
+  width: min(220px, 70vw);
   height: 2px;
-  background: #30404a;
-  margin: 14px;
+  overflow: hidden;
+  background: #405065;
 }
 
 .loadtrack i {
   display: block;
-  width: 100%;
+  width: 40%;
   height: 100%;
-  background: var(--orange);
-  animation: load 1s ease-out;
+  background: #ff9d76;
+  animation: loading-track 1.1s ease-in-out infinite alternate;
 }
 
-@keyframes load {
-  from {
-    width: 0;
-  }
-  to {
-    width: 100%;
-  }
+@keyframes loading-track {
+  from { transform: translateX(-85%); }
+  to { transform: translateX(235%); }
 }
 
 /* Modal panels */
@@ -298,8 +379,7 @@ footer {
   position: fixed;
   inset: 0;
   z-index: 25;
-  background: #020a13b8;
-  backdrop-filter: blur(8px);
+  background: #030a14d9;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -309,14 +389,21 @@ footer {
 .modal-panel {
   position: relative;
   color: #f3eee5;
-  border: 1px solid #64747f66;
-  background: #10212bf5;
+  border: 1px solid #91aec54d;
+  border-top-color: #ffac8499;
+  background: linear-gradient(155deg, #213a4c 0%, #152636 36%, #111f2c 78%);
+  border-radius: 8px;
   padding: 32px;
   max-width: 920px;
   width: 100%;
-  max-height: 86vh;
+  max-height: 86dvh;
   overflow-y: auto;
-  box-shadow: 0 25px 100px #0009;
+  box-shadow: 0 16px 62px #0009;
+  scrollbar-color: #5e778c #152636;
+}
+
+.modal-panel input[type='range'] {
+  accent-color: #ff9d76;
 }
 
 .modal-panel h2 {
@@ -1149,23 +1236,81 @@ kbd {
 
 @media (max-width: 960px) {
   .mode-dock {
-    grid-template-columns: repeat(3, 1fr);
-    bottom: 8%;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
+
   .mode {
-    padding: 12px 14px;
-    border-bottom: 1px solid var(--line);
+    min-height: 71px;
+    border-bottom: 1px solid #93b9d038;
   }
-  .mode strong {
-    font-size: 22px;
-  }
+
+  .mode:nth-child(3n) { border-right: 0; }
+  .mode:nth-child(n + 4) { border-bottom: 0; }
+  .mode strong { font-size: 25px; }
 }
 
 @media (max-width: 650px) {
-  .mode-dock {
-    grid-template-columns: repeat(2, 1fr);
+  #hangar {
+    grid-template-rows: auto minmax(300px, 1fr) auto;
+    padding: 18px 16px max(14px, env(safe-area-inset-bottom));
+    background:
+      linear-gradient(0deg, #0a121d 0%, #0a1423e8 32%, transparent 58%),
+      linear-gradient(180deg, #0a1524df, #0b1322a3 23%, transparent 56%);
   }
-  .cards {
+
+  .deck-header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 12px;
+    padding-bottom: 9px;
+  }
+
+  .deck-header nav {
+    justify-content: flex-start;
+    gap: 5px 13px;
+  }
+
+  .deck-header nav button,
+  .deck-header nav a { font-size: 13px; }
+
+  .deck-main {
     grid-template-columns: 1fr;
+    align-content: space-between;
+    gap: 12px;
+    padding: 28px 0 17px;
   }
+
+  .hangar-caption h1 { font-size: clamp(56px, 13vw, 85px); }
+
+  .aircraft-caption {
+    justify-self: end;
+    min-width: 140px;
+    padding: 3px 0 2px 10px;
+  }
+
+  .aircraft-caption h2 { font-size: 29px; }
+  .mode { padding: 10px 14px 9px 9px; }
+  .mode strong { font-size: 23px; }
+  .mode small { font-size: 11px; }
+  .mode-arrow { top: 6px; right: 6px; font-size: 11px; }
+  .deck-footer { gap: 6px; font-size: 9px; letter-spacing: 0.07em; }
+  .modal-backdrop { padding: 10px; }
+  .modal-panel { padding: 22px 17px; }
+  .cards { grid-template-columns: 1fr; }
+}
+
+@media (max-height: 600px) and (min-width: 651px) {
+  #hangar { grid-template-rows: auto minmax(170px, 1fr) auto; }
+  .deck-header { padding-bottom: 9px; }
+  .deck-main { padding-bottom: 14px; }
+  .hangar-caption h1 { font-size: clamp(50px, 12vh, 86px); }
+  .mode { min-height: 63px; padding-top: 9px; padding-bottom: 9px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .loadtrack i { animation: none; width: 100%; opacity: 0.6; }
+  .mode,
+  .mode-arrow { transition: none; }
+  .mode:hover .mode-arrow,
+  .mode:focus-visible .mode-arrow { transform: none; }
 }
