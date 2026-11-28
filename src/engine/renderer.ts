@@ -47,7 +47,10 @@ export interface RenderObject {
   scale?: number;
   size?: number;
   tint?: Vec3;
+  opacity?: number;
 }
+
+export type RenderTrail = { samples: TrailSample[]; opacity?: number };
 
 export interface RenderState {
   map: number;
@@ -373,9 +376,11 @@ const pointFragment = `#version 300 es
 precision highp float;
 in vec3 col;
 out vec4 color;
-uniform float night,tintStrength,emissive;
+uniform float night,tintStrength,emissive,opacity;
 uniform vec3 tint;
 void main(){
+  // Apply the same threshold to every point at a pixel so a dense jet fades as one surface.
+  if(opacity<1. && fract(52.9829189*fract(dot(floor(gl_FragCoord.xy),vec2(.06711056,.00583715))))>=opacity) discard;
   vec3 base=mix(col,tint*(.48+col.r*.52),tintStrength);
   color=vec4(mix(base,base*vec3(.64,.74,.91)+.045,night*(1.-emissive)),1.);
 }`;
@@ -1202,7 +1207,7 @@ export class Renderer {
     state: RenderState,
     time: number,
     objects: RenderObject[],
-    trails: TrailSample[][],
+    trails: RenderTrail[],
     target = 640
   ): void {
     const gl = this.gl;
@@ -1233,14 +1238,14 @@ export class Renderer {
       gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
       gl.depthMask(false);
       gl.bindVertexArray(this.trailVao);
-      for (const trail of trails) this.drawTrail(trail, time);
+      for (const trail of trails) this.drawTrail(trail.samples, time, trail.opacity ?? 1);
       gl.bindVertexArray(null);
       gl.depthMask(true);
       gl.disable(gl.BLEND);
     }
   }
 
-  drawTrail(trail: TrailSample[], time: number): void {
+  drawTrail(trail: TrailSample[], time: number, opacity: number): void {
     if (trail.length < 2) return;
     const gl = this.gl;
     const maxSamples = Math.floor(this.trailData.length / 8);
@@ -1252,7 +1257,7 @@ export class Renderer {
         const point = trail[i];
         const age = Math.max(0, time - point.time);
         const fade = clamp(1 - age / TRAIL_MAX_AGE, 0, 1);
-        const alpha = fade * fade * 0.72;
+        const alpha = fade * fade * 0.72 * opacity;
         const w = point[wing];
         this.trailData[offset++] = w[0];
         this.trailData[offset++] = w[1];
@@ -1299,6 +1304,7 @@ export class Renderer {
       emissive: Number(Boolean(effect || isFlame || structure)),
       tintStrength: Number(Boolean(object.tint)),
       tint: object.tint ?? [0, 0, 0],
+      opacity: object.opacity ?? 1,
     };
     for (const [name, value] of Object.entries(values)) this.uniform(this.points, name, value);
     gl.bindVertexArray(model.vao);

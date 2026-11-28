@@ -20,7 +20,6 @@ import {
   GLACIER_VAULT,
   height,
   maps,
-  mix,
   planes,
   pruneTrail,
   recordTrailSample,
@@ -30,8 +29,9 @@ import {
   VOLCANO,
   wingtipPositions,
 } from './engine/world';
-import { cameraAt, Renderer, type CameraState, type RenderObject, type TrailSample } from './engine/renderer';
+import { cameraAt, Renderer, type CameraState, type RenderObject, type RenderTrail, type TrailSample } from './engine/renderer';
 import { interpolateFlight, newFlight, SIM_STEP, stepFlight, views } from './engine/flight';
+import { advanceFlightCamera, sampleFlightCamera } from './engine/flight-camera';
 import { drawCockpit } from './engine/cockpit';
 import { drawCombatHud, Radar } from './engine/radar';
 import { BOSS_PROFILE_LABELS, missileWarning } from './engine/combat';
@@ -171,30 +171,6 @@ function buildFlightHelpText(s: GameSettings, hasGamepad: boolean): string {
   return `${steer} · ${boost} boost · ${brake} brake · ${formatBindingKey(b.roll)} roll · ${formatBindingKey(b.view)} view · ${gun} gun · ${missile} missile · ${rocket} rocket · ${flare} flare · ${formatBindingKey(b.map)} map`;
 }
 
-function clearCamera(position: Vec3, desired: Vec3, map: number): Vec3 {
-  const offset: Vec3 = [
-    desired[0] - position[0],
-    desired[1] - position[1],
-    desired[2] - position[2],
-  ];
-  const point = (fraction: number): Vec3 => add(position, scale(offset, fraction));
-  const steps = Math.ceil(Math.hypot(offset[0], offset[1], offset[2]) / 9);
-  for (let step = 1; step <= steps; step++) {
-    let past = step / steps;
-    const p = point(past);
-    if (!solidAt(p[0], p[1], p[2], map, 3)) continue;
-    let before = (step - 1) / steps;
-    for (let refine = 0; refine < 4; refine++) {
-      const middle = (before + past) / 2;
-      const mp = point(middle);
-      if (solidAt(mp[0], mp[1], mp[2], map, 3)) past = middle;
-      else before = middle;
-    }
-    return point(before);
-  }
-  return desired;
-}
-
 export const App: React.FC = () => {
   const uiRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<HTMLCanvasElement | null>(null);
@@ -258,13 +234,7 @@ export const App: React.FC = () => {
   const rollQueuedRef = useRef(false);
   const pointerRef = useRef<[number, number] | null>(null);
 
-  const lastCameraRef = useRef<{ eye: Vec3; target: Vec3; roll: number; fov: number } | null>(null);
-  const transitionRef = useRef<{
-    from: { eye: Vec3; target: Vec3; roll: number; fov: number };
-    opacity: number;
-    elapsed: number;
-  } | null>(null);
-  const displayedCockpitRef = useRef(0);
+  const cameraProgressRef = useRef<number | null>(null);
 
   // Crew sync refs
   const crewLatestRef = useRef<CrewSnapshot | null>(null);
@@ -421,9 +391,7 @@ export const App: React.FC = () => {
       pressedRef.current.clear();
       rollQueuedRef.current = false;
       radarRef.current?.reset();
-      lastCameraRef.current = null;
-      transitionRef.current = null;
-      displayedCockpitRef.current = 0;
+      cameraProgressRef.current = 0;
       setViewIndex(0);
       setMapVisible(true);
       setScene('flight');
@@ -479,13 +447,6 @@ export const App: React.FC = () => {
 
   const cycleView = useCallback(() => {
     if (sceneStateRef.current !== 'flight' || modalRef.current) return;
-    if (lastCameraRef.current) {
-      transitionRef.current = {
-        from: lastCameraRef.current,
-        opacity: displayedCockpitRef.current,
-        elapsed: 0,
-      };
-    }
     setViewIndex((v) => (v + 1) % views.length);
   }, []);
 
@@ -767,7 +728,8 @@ export const App: React.FC = () => {
       let pose: FlightState | null = null;
       let camera: CameraState;
       let objects: RenderObject[] = [];
-      let allTrails: TrailSample[][] = [];
+      const allTrails: RenderTrail[] = [];
+      let cockpitOpacity = 0;
       let aglClearance = 100;
 
       if (sceneStateRef.current === 'flight' && missionRef.current) {
@@ -814,8 +776,7 @@ export const App: React.FC = () => {
                 if (respawned) {
                   trailRef.current = [];
                   lastTrailRef.current = -1;
-                  lastCameraRef.current = null;
-                  transitionRef.current = null;
+                  cameraProgressRef.current = null;
                 }
                 crewSyncedRef.current = snap;
               }
@@ -976,8 +937,7 @@ export const App: React.FC = () => {
                 prevFlightRef.current = { ...f, pos: [...f.pos] as Vec3 };
                 trailRef.current = [];
                 lastTrailRef.current = -1;
-                lastCameraRef.current = null;
-                transitionRef.current = null;
+                cameraProgressRef.current = null;
               }
               rememberPlayerTrail(f, simTimeRef.current);
               accumulator -= SIM_STEP;
@@ -989,71 +949,29 @@ export const App: React.FC = () => {
           ? crewPredictionRef.current.smooth(interpolateFlight(prevFlightRef.current, f, crewAccumulator / CREW_STEP), dt)
           : interpolateFlight(prevFlightRef.current, f, accumulator / SIM_STEP);
 
-        // Camera with smooth 1.4s Chase <-> Cockpit transition + camera shake
         const front = forward(pose.yaw, pose.pitch);
         const shakeAmt = m.shake * 2.4;
         const jitter: Vec3 = shakeAmt > 0.05
           ? [(Math.random() - 0.5) * shakeAmt, (Math.random() - 0.5) * shakeAmt, 0]
           : [0, 0, 0];
 
-        let eye: Vec3;
-        let target: Vec3;
-        let roll: number;
-        let fov: number;
-        if (viewRef.current === 1) {
-          eye = add(pose.pos, add(scale(front, 4), [jitter[0] * 0.2, 3 + jitter[1] * 0.2, 0]));
-          target = add(eye, front);
-          roll = pose.roll;
-          fov = 0.74;
-        } else {
-          eye = add(
-            pose.pos,
-            add(scale(front, -64 - pose.boost * 9), [jitter[0], 15 + jitter[1], 0])
-          );
-          target = add(pose.pos, add(scale(front, 15), [0, 4, 0]));
-          roll = pose.bank * 0.16;
-          fov = 0.59 + pose.boost * 0.06;
-          eye = clearCamera(pose.pos, eye, curMap);
-        }
-
-        const to = { eye, target, roll, fov };
-        const targetCockpit = Number(viewRef.current === 1);
-        if (!transitionRef.current) {
-          lastCameraRef.current = to;
-          displayedCockpitRef.current = targetCockpit;
-          camera = cameraAt(eye, target, roll, fov);
-        } else {
-          transitionRef.current.elapsed = Math.min(
-            1.4,
-            transitionRef.current.elapsed + (modalRef.current ? 0 : dt)
-          );
-          const t = transitionRef.current.elapsed / 1.4;
-          const eased = t * t * (3 - 2 * t);
-          const from = transitionRef.current.from;
-          const blend = (a: Vec3, b: Vec3): Vec3 => [
-            mix(a[0], b[0], eased),
-            mix(a[1], b[1], eased),
-            mix(a[2], b[2], eased),
-          ];
-          const shortest = Math.atan2(Math.sin(roll - from.roll), Math.cos(roll - from.roll));
-          lastCameraRef.current = {
-            eye: blend(from.eye, eye),
-            target: blend(from.target, target),
-            roll: from.roll + shortest * eased,
-            fov: mix(from.fov, fov, eased),
-          };
-          displayedCockpitRef.current = mix(transitionRef.current.opacity, targetCockpit, eased);
-          if (t >= 1) transitionRef.current = null;
-          const clearEye = clearCamera(pose.pos, lastCameraRef.current.eye, curMap);
-          camera = cameraAt(clearEye, lastCameraRef.current.target, lastCameraRef.current.roll, lastCameraRef.current.fov);
-        }
+        const inCockpit = viewRef.current === 1;
+        const previousProgress = cameraProgressRef.current;
+        const progress = reducedMotion.matches || previousProgress === null
+          ? Number(inCockpit)
+          : advanceFlightCamera(previousProgress, inCockpit, modalRef.current ? 0 : dt);
+        cameraProgressRef.current = progress;
+        const view = sampleFlightCamera(pose, progress, curMap, innerWidth / innerHeight, jitter);
+        cockpitOpacity = view.cockpitOpacity;
+        camera = cameraAt(view.eye, view.target, view.roll, view.fov);
 
         // Collect render objects (player, allies, enemies, ground structures, rings, shots, effects)
-        if (pose.death <= 0 && displayedCockpitRef.current < 0.84) {
-          objects.push(pose);
+        if (pose.death <= 0 && view.exteriorOpacity > 0) {
+          objects.push(view.exteriorOpacity === 1 ? pose : { ...pose, opacity: view.exteriorOpacity });
           if (pose.boost > 0.16) {
             const back = scale(front, -10 * (planes[pose.type]?.size ?? 1));
-            objects.push({ ...pose, kind: 'flame', pos: add(pose.pos, back), scale: 1 + pose.boost * 1.4 });
+            objects.push({ ...pose, kind: 'flame', pos: add(pose.pos, back),
+              scale: 1 + pose.boost * 1.4, opacity: view.exteriorOpacity });
           }
         }
         objects.push(...m.allies, ...m.enemies, ...m.shots, ...m.effects);
@@ -1104,23 +1022,24 @@ export const App: React.FC = () => {
           }
         }
 
-        // Universal contrails for player + all AI aircraft (anchored to live 3D wingtips)
-        if (pose.death <= 0 && trailRef.current.length >= 1) {
-          const liveTips = wingtipPositions(pose.pos, pose.type, pose.yaw, pose.pitch, pose.roll);
-          allTrails.push([
-            ...trailRef.current,
-            { time: simTimeRef.current, left: liveTips.left, right: liveTips.right },
-          ]);
-        } else if (trailRef.current.length >= 2) {
-          allTrails.push(trailRef.current);
+        // Fade the player contrails with the exterior jet during the canopy handoff.
+        if (view.exteriorOpacity > 0) {
+          if (pose.death <= 0 && trailRef.current.length >= 1) {
+            const liveTips = wingtipPositions(pose.pos, pose.type, pose.yaw, pose.pitch, pose.roll);
+            allTrails.push({
+              samples: [...trailRef.current, { time: simTimeRef.current, left: liveTips.left, right: liveTips.right }],
+              opacity: view.exteriorOpacity,
+            });
+          } else if (trailRef.current.length >= 2) {
+            allTrails.push({ samples: trailRef.current, opacity: view.exteriorOpacity });
+          }
         }
         for (const ac of [...m.allies, ...m.enemies]) {
           if (ac.trail.length >= 1) {
             const acTips = wingtipPositions(ac.pos, ac.type, ac.yaw, ac.pitch, ac.roll);
-            allTrails.push([
-              ...ac.trail,
-              { time: simTimeRef.current, left: acTips.left, right: acTips.right },
-            ]);
+            allTrails.push({
+              samples: [...ac.trail, { time: simTimeRef.current, left: acTips.left, right: acTips.right }],
+            });
           }
         }
 
@@ -1268,7 +1187,7 @@ export const App: React.FC = () => {
           overlay.height,
           pose,
           missionRef.current,
-          displayedCockpitRef.current,
+          cockpitOpacity,
           aglClearance
         );
         drawCombatHud(
