@@ -61,6 +61,10 @@ export class CrewRoom extends DurableObject {
       this.terminate();
       return reply({ ok:true });
     }
+    if (path === '/abandon' && request.method === 'POST') {
+      if (this.match?.phase !== 'playing') this.terminate();
+      return reply({ ok: true });
+    }
     if (this.closed) return bad('This lobby is closed.',410);
     if (path === '/session' && request.method === 'POST') {
       const { token, body } = await readBody(request);
@@ -69,6 +73,8 @@ export class CrewRoom extends DurableObject {
       const [id] = entry;
       if (body.action === 'close' && id !== this.plan.host) return bad('Only the host can close the lobby.', 403);
       if (body.action === 'leave' || body.action === 'close') {
+        // Older tabs can send this on pagehide. The socket owns active match presence.
+        if (body.action === 'leave' && this.match?.phase === 'playing') return reply({ ok: true });
         if (id === this.plan.host) this.terminate();
         else {
           this.resumes.delete(id);
@@ -139,7 +145,7 @@ export class CrewRoom extends DurableObject {
       this.send(client, JSON.stringify({ t: 'pong', at: message.at }));
     } else if (message.t==='input' && this.match &&
         (message.matchId === undefined || message.matchId === this.match.start)) {
-      setMatchInput(this.match,client.id,message.command,now,message.sequence);
+      setMatchInput(this.match,client.id,message.command,now,message.sequence,message.view);
     } else if (message.t==='start' && client.id===this.plan.host && this.match?.phase!=='playing') {
       if (this.plan.members.some(member=>!this.clients.has(member.id))) {
         this.send(client,JSON.stringify({t:'error',message:'Wait for every invited pilot to join.'}));

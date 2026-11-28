@@ -1,3 +1,4 @@
+import { createRearmRings, DIFFICULTY_LABELS, rearmThroughRing, type LockView } from '../../shared/combat-rules.js';
 import type {
   AircraftEntity,
   BotDifficulty,
@@ -27,7 +28,7 @@ import {
   VOLCANO,
 } from './world';
 import {
-  acquireTarget,
+  updateTargetLock,
   bossProfileForName,
   createAircraft,
   createWeapons,
@@ -254,10 +255,15 @@ export function createMission(
     groundTargets: [],
     rings: [],
     nextRingIndex: 0,
+    rearmRings: createRearmRings(
+      opts?.map ?? opts?.skirmish?.map ?? (mode === 'story' ? getCampaignLevel(opts?.levelId ?? 1).map : Number(opts?.timeTrialCourse === 'glacier')),
+      height
+    ),
     shots: [],
     effects: [],
     arms: createWeapons(flight.type),
     target: null,
+    lockProgress: 0,
     message: '',
     flash: 0,
     shake: 0,
@@ -363,7 +369,7 @@ export function createMission(
       );
     }
     base.enemies = spawnEnemyWave(flight, counts[1], cfg.difficulty, 1, false);
-    tell(base, `SKIRMISH ${cfg.preset.toUpperCase()} • ${cfg.difficulty.toUpperCase()} BOTS`);
+    tell(base, `SKIRMISH ${cfg.preset.toUpperCase()} • ${DIFFICULTY_LABELS[cfg.difficulty].toUpperCase()} BOTS`);
     return base;
   }
 
@@ -470,7 +476,9 @@ export function stepMission(
   flight: FlightState,
   command: ControlInput,
   map: number,
-  dt: number
+  dt: number,
+  lockView: LockView = { aspect: 16 / 9, cockpit: false },
+  previousPos: Vec3 = flight.pos
 ): StepMissionEvents {
   const phaseBefore = mission.phase;
   mission.time += dt;
@@ -500,7 +508,7 @@ export function stepMission(
 
   if (mission.phase === 'ambush') updateDeadAirAmbush(mission, flight);
 
-  mission.target = acquireTarget(mission.enemies, mission.groundTargets, flight);
+  updateTargetLock(mission, flight, map, dt, lockView);
   const wEvents = updatePlayerWeapons(mission, flight, command, map, dt);
 
   for (const ally of mission.allies) {
@@ -511,7 +519,10 @@ export function stepMission(
   }
   stepGroundTargets(mission, flight, map, dt);
   const sEvents = updateShots(mission, flight, map, dt);
-  mission.target = acquireTarget(mission.enemies, mission.groundTargets, flight);
+  if (mission.target && (mission.target.hp <= 0 || ('destroyed' in mission.target && mission.target.destroyed))) {
+    mission.target = null;
+    mission.lockProgress = 0;
+  }
 
   // Active Volcano (Map 0) rising ember & volcanic smoke plume particles at [0, 0]
   if (
@@ -624,6 +635,12 @@ export function stepMission(
     tell(mission, 'VOLCANO CORE DEPOT • Fuel 100%, Hull repaired & Weapons rearmed!');
   }
 
+  if (flight.death <= 0 && !flight.recovered && mission.phase !== 'complete' && mission.phase !== 'failed' &&
+      rearmThroughRing(mission.rearmRings, mission.arms, previousPos, flight.pos, mission.time)) {
+    rearmed = true;
+    tell(mission, 'REARM CHECKPOINT • Missiles and flares refilled');
+  }
+
   // Ring / Rearm ring collisions
   let ringPassed = false;
   if (flight.death <= 0 && mission.rings.length > 0 && mission.phase !== 'failed') {
@@ -652,7 +669,7 @@ export function stepMission(
           flight.lowFuel = false;
           flight.flameout = false;
           mission.arms = createWeapons(flight.type);
-          tell(mission, 'REARM RING • Fuel 100%, Hull repaired & missiles reloaded!');
+          tell(mission, 'REARM RING • Fuel, hull, missiles and flares restored!');
         }
       }
     }
@@ -740,7 +757,7 @@ export function stepMission(
         mission.wave >= 5 ? 'ace' : mission.wave >= 3 ? 'veteran' : 'standard';
       mission.enemies = spawnEnemyWave(flight, count, diff, mission.wave, false);
       mission.rings = [spawnRearmRing(flight, map)];
-      tell(mission, `WAVE ${mission.wave} • ${count} ${diff.toUpperCase()} HOSTILES · Rearm ring deployed`);
+      tell(mission, `WAVE ${mission.wave} • ${count} ${DIFFICULTY_LABELS[diff].toUpperCase()} HOSTILES · Rearm ring deployed`);
     }
   }
 

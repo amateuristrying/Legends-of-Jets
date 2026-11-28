@@ -942,7 +942,30 @@ kbd {
 }
 
 #arsenal.overheated div:first-child b {
+  color: #ff625b;
+  text-shadow: 0 0 8px #ff504980;
+}
+
+#arsenal .ammo-empty b {
   color: #ff9778;
+}
+
+.missile-rack {
+  display: inline-flex;
+  gap: 3px;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
+.missile-rack i {
+  width: 4px;
+  height: 10px;
+  border: 1px solid #81929d80;
+}
+
+.missile-rack i.loaded {
+  border-color: #b8f2d6;
+  background: #b8f2d6;
 }
 
 #heat {
@@ -1231,6 +1254,31 @@ kbd {
   }
   #flight-help {
     display: none;
+  }
+}
+
+@media (max-width: 760px) {
+  #flight-stats,
+  #arsenal {
+    right: 3%;
+    left: 3%;
+    justify-content: space-between;
+    gap: 5px;
+    padding: 6px 8px;
+  }
+
+  #flight-stats { bottom: 40px; }
+  #arsenal { bottom: 10px; font-size: 10px; }
+  #heat { width: 32px; }
+  #flight-help { display: none; }
+  #touch { bottom: 78px; }
+  #touch button { padding: 8px 4px; font-size: 10px; }
+}
+
+@media (max-width: 500px) and (pointer: coarse) {
+  #touch {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
   }
 }
 

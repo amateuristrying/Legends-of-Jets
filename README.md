@@ -76,12 +76,14 @@ All bindings are customizable in **Settings**, with full support for **Mouse-Aim
 | Roll | `E` | Manual roll input |
 | Afterburner | `Shift` | Speed boost (`~3x` fuel burn) |
 | Airbrake | `B` | Decelerate for tight canyon/tunnel passes |
-| Fire Cannon | `G` | Unlimited rounds (subject to barrel heat) |
-| Launch Missile | `M` | Guided IR/radar seeker (`34m` crater on ground hit) |
+| Fire Cannon | `G` | Unlimited rounds, 20 damage per hit. A confirmed lock enables aim assist. |
+| Launch Missile | `M` | Three per aircraft, 80 damage per hit. Wait for the green lock indicator. |
 | Fire Rocket | `X` | Unguided pod salvo (`18m` crater & wall carving) |
-| Deploy Flare | `F` | Diverts incoming missile locks |
+| Deploy Flare | `F` | One charge drops three staggered decoy pods to divert incoming missiles. |
 | Toggle Radar | `R` | Show/hide tactical minimap (click relays to inspect) |
 | Camera View | `Space` | Cycle chase / cockpit view (or **Retry Sortie** on failed debrief) |
+
+A green box tracks your locked target until it leaves view or terrain breaks line of sight. Fly through a green rearm ring to reload missiles and flares. The ring can refill you again after 15 seconds. Standard AI opponents have 100, 125, or 150 HP on Easy, Medium, and Difficult. Campaign bosses have their own hull ratings.
 
 ---
 
@@ -116,7 +118,7 @@ All bindings are customizable in **Settings**, with full support for **Mouse-Aim
 2. Copy your code to a friend, or enter their code and send an invite. The recipient accepts, then the host creates a lobby and invites the accepted pilots.
 3. Keep the same game tabs open while you play. Reloading a tab creates a new code. Any invites and lobby access tied to the old code expire. A Worker restart can also clear active sessions.
 
-Codes, invite lists, and online matches live in memory. An open tab keeps its code with heartbeats. Idle codes expire after ten minutes, and reloading still generates a new code. A briefly disconnected player can rejoin a running match from the same tab using its lobby session. A Worker restart can clear in-memory Crew state. Single-player saves and settings use browser storage independently of Crew.
+Codes, invite lists, and online matches live in memory. An open tab keeps its code with heartbeats. Idle codes expire after ten minutes, and reloading generates a new code. If a player loses their connection, the match keeps running for everyone else while the open tab retries its connection. A Worker restart can clear in-memory Crew state. Single-player saves and settings use browser storage independently of Crew.
 
 ### Deploy Crew at the existing Pages address
 

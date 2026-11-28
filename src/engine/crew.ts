@@ -1,4 +1,5 @@
 import type { ControlInput, FlightState, Vec3, WeaponsState } from './types';
+import type { LockView } from '../../shared/combat-rules.js';
 
 const api = '/api/crew/';
 const protocol = 'legends.crew.v1';
@@ -49,6 +50,9 @@ export interface CrewSnapshot {
     bot: boolean;
     points: number;
     deaths: number;
+    hits: number;
+    lockProgress: number;
+    rearmCooldowns: number[];
     inputAck: number;
     flight: FlightState;
     arms: WeaponsState;
@@ -176,20 +180,14 @@ export class CrewClient {
     };
     const pageHide = (event: PageTransitionEvent) => {
       pageOpen = false;
-      if (event.persisted) return;
+      if (event.persisted || this.room) return;
       this.pageGeneration++;
       const token = this.token;
-      const { room, resumeToken } = this;
       this.token = null;
       this.opening = null;
-      this.disconnect();
       if (token) void request('session/end', {}, token, true).catch(() => {});
-      if (room && resumeToken) {
-        void request('room-session', { room, action: 'leave' }, resumeToken, true).catch(() => {});
-      }
     };
-    const pageShow = (event: PageTransitionEvent) => {
-      if (!event.persisted) return;
+    const pageShow = () => {
       pageOpen = true;
       void maintain();
     };
@@ -325,12 +323,9 @@ export class CrewClient {
 
   private scheduleReconnect(room: string, plane: number, generation: number): void {
     this.onConnection?.(false);
-    if (this.retries >= 12) {
-      this.endRoom('Could not reconnect to Crew. Rejoin from the hangar.');
-      return;
-    }
     this.onStatus?.('Connection interrupted. Reconnecting…', true);
-    const delay = Math.min(500 * 2 ** this.retries++, 5000);
+    const delay = Math.min(500 * 2 ** this.retries, 5000);
+    this.retries = Math.min(this.retries + 1, 4);
     this.reconnectTimer = window.setTimeout(() => {
       if (this.roomGeneration !== generation) return;
       void this.openSocket(room, plane, generation).catch((error) => {
@@ -365,12 +360,12 @@ export class CrewClient {
     this.send({ t: 'start' });
   }
 
-  sendControls(command: ControlInput, matchId: number): number | null {
+  sendControls(command: ControlInput, matchId: number, view: LockView): number | null {
     for (const flag of ['missile', 'rocket', 'flare', 'roll'] as const) {
       if (command[flag]) this.inputFlags[flag] = true;
     }
     const sequence = this.inputSequence + 1;
-    if (!this.send({ t: 'input', matchId, sequence, command: { ...command, ...this.inputFlags } })) return null;
+    if (!this.send({ t: 'input', matchId, sequence, view, command: { ...command, ...this.inputFlags } })) return null;
     this.inputFlags = {};
     this.inputSequence = sequence;
     return sequence;

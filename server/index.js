@@ -56,7 +56,7 @@ export default {
       }
       if (path === 'session/end' && response.ok) {
         const { closedRooms } = await response.json();
-        ctx.waitUntil(Promise.all(closedRooms.map(id => roomWorker(id).fetch(internal('/terminate', {})))));
+        ctx.waitUntil(Promise.all(closedRooms.map(id => roomWorker(id).fetch(internal('/abandon', {})))));
         return reply({ ok: true });
       }
       return response;

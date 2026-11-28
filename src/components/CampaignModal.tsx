@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { DIFFICULTY_LABELS } from '../../shared/combat-rules.js';
 import type { PilotLog } from '../engine/types';
 import { CAMPAIGN_LEVELS } from '../engine/campaign';
 import { maps } from '../engine/world';
@@ -84,7 +85,7 @@ export const CampaignModal: React.FC<Props> = ({ pilotLog, onLaunchLevel, onClos
               </span>
               <span>
                 {maps[selected.map].name.toUpperCase()} / {selected.atmosphere.toUpperCase()} ·{' '}
-                {selected.difficulty.toUpperCase()}
+                {DIFFICULTY_LABELS[selected.difficulty].toUpperCase()}
               </span>
             </div>
             <h3 style={{ margin: '4px 0 8px' }}>{selected.title}</h3>

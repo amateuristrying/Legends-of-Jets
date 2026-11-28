@@ -1,3 +1,5 @@
+import type { RearmRing } from '../../shared/combat-rules.js';
+
 export type Vec3 = [number, number, number];
 
 export type AtmospherePreset = 'day' | 'golden' | 'night' | 'storm' | 'aurora';
@@ -89,6 +91,7 @@ export interface WeaponsState {
   flaresLeft: number;
   maxFlares: number;
   evade: number;
+  flarePod?: { pos: Vec3; velocity: Vec3 };
 }
 
 export interface TrailSample {
@@ -142,6 +145,8 @@ export interface ShotEntity {
   ownerName?: string;
   fromTeam?: number;
   smokeTimer?: number;
+  assisted?: boolean;
+  decoyed?: boolean;
 }
 
 export interface EffectEntity {
@@ -253,12 +258,14 @@ export interface MissionState {
   enemies: AircraftEntity[];
   groundTargets: GroundTarget[];
   rings: RingCheckpoint[];
+  rearmRings: RearmRing[];
   nextRingIndex: number;
   extractionPos?: Vec3;
   shots: ShotEntity[];
   effects: EffectEntity[];
   arms: WeaponsState;
   target: AircraftEntity | GroundTarget | null;
+  lockProgress: number;
   message: string;
   flash: number;
   shake: number;

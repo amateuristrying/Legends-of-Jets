@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { DIFFICULTY_LABELS } from '../../shared/combat-rules.js';
 import { CrewClient, type CrewLobby, type CrewProfile, type CrewRules } from '../engine/crew';
 import { isPlaneUnlocked } from '../engine/storage';
 import type { PilotLog } from '../engine/types';
@@ -119,7 +120,7 @@ export const CrewModal: React.FC<Props> = ({
             <p>
               {lobby.rules.seats} Players · {lobby.rules.seconds / 60} min ·{' '}
               {lobby.rules.map === 0 ? 'Ember Canyon' : 'Frostline Reach'}
-              {lobby.rules.mode === 'bots' ? ` · ${lobby.rules.difficulty}` : ''}
+              {lobby.rules.mode === 'bots' ? ` · ${DIFFICULTY_LABELS[lobby.rules.difficulty]}` : ''}
             </p>
             <div className="row">
               <label>In-Lobby Aircraft</label>
@@ -331,6 +332,19 @@ export const CrewModal: React.FC<Props> = ({
                   <option value={1}>Frostline Reach</option>
                 </select>
               </label>
+              {rules.mode === 'bots' && (
+                <label>
+                  Bot difficulty
+                  <select
+                    value={rules.difficulty}
+                    onChange={(e) => setRules({ ...rules, difficulty: e.target.value as CrewRules['difficulty'] })}
+                  >
+                    {Object.entries(DIFFICULTY_LABELS).map(([value, label]) => (
+                      <option key={value} value={value}>{label}</option>
+                    ))}
+                  </select>
+                </label>
+              )}
               <label>
                 Length
                 <select

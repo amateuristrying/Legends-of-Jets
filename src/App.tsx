@@ -1,3 +1,4 @@
+import { DIFFICULTY_LABELS } from '../shared/combat-rules.js';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import type {
   AtmospherePreset,
@@ -87,6 +88,7 @@ interface HudSnapshot {
   heat: number;
   overheated: boolean;
   missiles: number;
+  maxMissiles: number;
   rockets: number;
   flareText: string;
   flaresLeft: number;
@@ -124,6 +126,7 @@ const INITIAL_HUD: HudSnapshot = {
   heat: 0,
   overheated: false,
   missiles: 3,
+  maxMissiles: 3,
   rockets: 6,
   flareText: 'READY',
   flaresLeft: 4,
@@ -366,6 +369,8 @@ export const App: React.FC = () => {
         position = [VOLCANO.x, VOLCANO.tunnelAltitude, VOLCANO.z - 436];
       } else if (opts?.glacier || opts?.timeTrialCourse === 'glacier') {
         position = [GLACIER_VAULT.x, GLACIER_VAULT.tunnelAltitude, GLACIER_VAULT.z - 420];
+      } else if (mode === 'skirmish') {
+        position = map === 0 ? [0, 690, -680] : [-420, 690, -640];
       } else {
         position = map === 0 ? [0, 260, -680] : [-420, 280, -640];
       }
@@ -768,6 +773,7 @@ export const App: React.FC = () => {
       if (sceneStateRef.current === 'flight' && missionRef.current) {
         const m = missionRef.current;
         const f = flightRef.current;
+        const lockView = { cockpit: viewRef.current === 1, aspect: clamp(innerWidth / innerHeight, 0.4, 3) };
 
         if (!modalRef.current) {
           logAccumulator += dt;
@@ -786,10 +792,19 @@ export const App: React.FC = () => {
             const own = snap.pilots.find((p) => p.id === crewIdRef.current);
             const timeline = crewTimelineRef.current.sample(time);
             if (own && timeline) {
+              m.hitMarker = Math.max(0, m.hitMarker - dt);
               const prediction = crewPredictionRef.current;
               const synced = crewSyncedRef.current;
               if (synced !== snap) {
                 const prior = synced?.pilots.find((p) => p.id === own.id);
+                if (prior && own.hits > prior.hits) {
+                  m.hitMarker = 0.22;
+                  audioRef.current?.feedback('hit', settingsRef.current);
+                }
+                own.rearmCooldowns?.forEach((seconds, index) => {
+                  const ring = m.rearmRings[index];
+                  if (ring) ring.readyAt = snap.time + seconds;
+                });
                 const respawned = own.flight.recovered || (f.death > 0 && own.flight.death <= 0) ||
                   (prior !== undefined && own.deaths !== prior.deaths && own.flight.death <= 0);
                 const discontinuity = !synced || respawned || (f.death > 0) !== (own.flight.death > 0);
@@ -838,6 +853,8 @@ export const App: React.FC = () => {
               m.allies = contacts.filter((c) => c.friendly);
               m.enemies = contacts.filter((c) => !c.friendly);
               m.target = contacts.find((c) => c.id === own.target) ?? null;
+              m.lockProgress = own.lockProgress ?? (m.target ? 1 : 0);
+              m.time = snap.time;
               m.arms = { ...m.arms, ...own.arms };
               m.kills = own.points;
               m.message = own.message;
@@ -866,7 +883,7 @@ export const App: React.FC = () => {
                   crewAccumulator += dt;
                   while (crewAccumulator >= CREW_STEP) {
                     const cmd = sampleInput();
-                    const sequence = crewRef.current!.sendControls(cmd, snap.matchId);
+                    const sequence = crewRef.current!.sendControls(cmd, snap.matchId, lockView);
                     prevFlightRef.current = { ...f };
                     Object.assign(f, prediction.step(f, cmd, curMap, sequence));
                     simTimeRef.current += CREW_STEP;
@@ -885,7 +902,7 @@ export const App: React.FC = () => {
               const cmd = sampleInput();
               const warningBefore = missileWarning(m, f);
               stepFlight(f, cmd, curMap, SIM_STEP, settingsRef.current.flightModel);
-              const ev = stepMission(m, f, cmd, curMap, SIM_STEP);
+              const ev = stepMission(m, f, cmd, curMap, SIM_STEP, lockView, prevFlightRef.current.pos);
 
               const aud = audioRef.current;
               if (aud) {
@@ -1076,6 +1093,11 @@ export const App: React.FC = () => {
             size: isNext ? 4.2 : 2.2,
           });
         }
+        for (const ring of m.rearmRings) {
+          const ready = ring.readyAt <= m.time;
+          objects.push({ kind: 'rearm', pos: ring.pos, yaw: ring.yaw,
+            scale: ring.radius / 28, size: ready ? 4.3 : 2.4 });
+        }
         if (m.phase === 'relay') {
           for (const rel of RELAYS) {
             objects.push({ kind: 'relay', pos: relayPosition(rel, curMap), size: 3.8 });
@@ -1147,6 +1169,7 @@ export const App: React.FC = () => {
             heat: m.arms.heat,
             overheated: m.arms.overheated,
             missiles: m.arms.missiles,
+            maxMissiles: m.arms.maxMissiles,
             rockets: m.arms.rockets,
             flareText: m.arms.flare > 0 ? `${m.arms.flare.toFixed(1)}S` : 'READY',
             flaresLeft: m.arms.flaresLeft,
@@ -1468,15 +1491,19 @@ export const App: React.FC = () => {
             </span>
           </div>
 
-          <div id="arsenal" className={hud.overheated ? 'overheated' : ''}>
+          <div id="arsenal" className={hud.overheated || hud.heat >= 0.76 ? 'overheated' : ''}>
             <div>
               <span>
                 GUN <b>∞</b>
               </span>
               <meter id="heat" min={0} max={1} low={0.35} high={0.82} optimum={0} value={hud.heat} />
             </div>
-            <div>
-              MSL <b>{hud.missiles}</b>
+            <div className={hud.missiles === 0 ? 'ammo-empty' : ''} aria-label={`${hud.missiles} of ${hud.maxMissiles} missiles remaining`}>
+              MSL <b>{hud.missiles}/{hud.maxMissiles}</b>
+              <span className="missile-rack" aria-hidden="true">
+                {Array.from({ length: hud.maxMissiles }, (_, index) =>
+                  <i key={index} className={index < hud.missiles ? 'loaded' : ''} />)}
+              </span>
             </div>
             <div>
               RKT <b>{hud.rockets}</b>
@@ -1750,7 +1777,7 @@ export const App: React.FC = () => {
                     className={skirmishCfg.difficulty === d ? 'active' : ''}
                     onClick={() => setSkirmishCfg({ ...skirmishCfg, difficulty: d })}
                   >
-                    {d.toUpperCase()}
+                    {DIFFICULTY_LABELS[d]}
                   </button>
                 ))}
               </div>

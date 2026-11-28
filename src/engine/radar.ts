@@ -1,3 +1,4 @@
+import { cannonLead } from '../../shared/combat-rules.js';
 import type { FlightState, MissionState, Vec3 } from './types';
 import type { CameraState } from './renderer';
 import {
@@ -228,6 +229,22 @@ export class Radar {
       ctx.stroke();
     }
 
+    for (const ring of mission.rearmRings) {
+      const [x, y] = screen(ring.pos);
+      const ready = ring.readyAt <= mission.time;
+      ctx.strokeStyle = ready ? '#45ff9a' : '#547b73';
+      ctx.lineWidth = ready ? 1.7 : 1;
+      ctx.beginPath();
+      ctx.arc(x, y, 6, 0, Math.PI * 2);
+      ctx.stroke();
+      if (ready) {
+        ctx.beginPath();
+        ctx.moveTo(x - 3, y); ctx.lineTo(x + 3, y);
+        ctx.moveTo(x, y - 3); ctx.lineTo(x, y + 3);
+        ctx.stroke();
+      }
+    }
+
     // Aircraft blips
     for (const plane of [...mission.allies, ...mission.enemies]) {
       const [x, y] = screen(plane.pos);
@@ -387,7 +404,9 @@ export function drawCombatHud(
   if (aim && mission.phase !== 'complete') {
     const [x, y] = aim;
     const r = Math.max(7, height * 0.016);
-    ctx.strokeStyle = mission.target ? '#ffd37a' : '#b3efdbb3';
+    const locked = mission.lockProgress >= 1;
+    const lockColor = locked ? '#91ffaf' : '#ffd37a';
+    ctx.strokeStyle = mission.target ? lockColor : '#b3efdbb3';
     ctx.lineWidth = 1.2;
     ctx.beginPath();
     ctx.moveTo(x - r, y);
@@ -422,12 +441,14 @@ export function drawCombatHud(
       const t = mission.target;
       const marker = project(t.pos, camera, width, height);
       const range = Math.round(dist3(flight.pos, t.pos));
-      if (marker) {
+      if (marker && marker[0] > 0 && marker[0] < width && marker[1] > 0 && marker[1] < height) {
         const [tx, ty] = marker;
         const box = r + 4;
-        ctx.strokeStyle = '#ffd37a';
+        ctx.strokeStyle = lockColor;
         ctx.lineWidth = 1.2;
+        if (!locked) ctx.setLineDash([3, 2]);
         ctx.strokeRect(tx - box, ty - box, box * 2, box * 2);
+        ctx.setLineDash([]);
 
         // Target HP bar & range label
         const hpRatio = clamp(t.hp / Math.max(1, t.maxHp), 0, 1);
@@ -436,14 +457,20 @@ export function drawCombatHud(
         ctx.fillStyle = hpRatio < 0.35 ? '#ff6454' : '#ffd37a';
         ctx.fillRect(tx - box, ty - box - 5, box * 2 * hpRatio, 3);
         ctx.font = 'bold 8px monospace';
-        ctx.fillStyle = '#ffd37a';
-        ctx.fillText(`${t.name} · ${range}M`, tx + box + 4, ty + 3);
+        ctx.fillStyle = lockColor;
+        const labelX = Math.min(tx + box + 4, width - 112);
+        const lockText = `${locked ? 'LOCKED' : `TRACK ${Math.floor(mission.lockProgress * 100)}%`} · ${range}M`;
+        const hullText = `${t.name} · ${Math.ceil(t.hp)}/${t.maxHp} HP`;
+        ctx.strokeStyle = '#092017';
+        ctx.strokeText(lockText, labelX, ty + 1);
+        ctx.strokeText(hullText, labelX, ty + 11);
+        ctx.fillText(lockText, labelX, ty + 1);
+        ctx.fillText(hullText, labelX, ty + 11);
       }
 
       // Dynamic gun lead pip for moving aircraft
-      if (isAircraft(t)) {
-        const leadTime = range / 1020;
-        const leadPos = add(t.pos, scale(forward(t.yaw, t.pitch), t.speed * leadTime));
+      if (locked && isAircraft(t)) {
+        const leadPos = cannonLead(add(flight.pos, scale(forward(flight.yaw, flight.pitch), 15)), t);
         const pip = project(leadPos, camera, width, height);
         if (pip) {
           ctx.strokeStyle = '#8ef4ce';
@@ -483,10 +510,15 @@ export function drawCombatHud(
   }
 
   // Next checkpoint / rearm ring waypoint diamond
-  const activeRing =
-    mission.phase === 'rings'
-      ? mission.rings[mission.nextRingIndex]
-      : mission.rings.find((r) => r.isRearm && !r.passed);
+  const nearestRearm = mission.rearmRings.reduce<(typeof mission.rearmRings)[number] | undefined>(
+    (nearest, ring) => ring.readyAt <= mission.time &&
+      (!nearest || dist3(flight.pos, ring.pos) < dist3(flight.pos, nearest.pos)) ? ring : nearest,
+    undefined
+  );
+  const supportRing = nearestRearm ? { ...nearestRearm, isRearm: true } : undefined;
+  const activeRing = mission.phase === 'rings'
+    ? mission.rings[mission.nextRingIndex]
+    : mission.rings.find((r) => r.isRearm && !r.passed) ?? supportRing;
   if (activeRing) {
     const pt = project(activeRing.pos, camera, width, height);
     const d = Math.round(dist3(flight.pos, activeRing.pos));

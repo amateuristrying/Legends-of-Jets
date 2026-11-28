@@ -1,3 +1,4 @@
+import { CANNON_DAMAGE, CANNON_SPEED, MISSILE_DAMAGE, cannonLead, hitSegment, stepFlarePattern, trackLock } from '../../shared/combat-rules.js';
 import {
   add,
   CENTRAL_REFUEL_RADIUS,
@@ -12,6 +13,7 @@ import {
   scale,
   solidAt,
   sub,
+  TERRAIN_HEIGHT,
   VOLCANO,
 } from './world.js';
 
@@ -90,6 +92,7 @@ export function newMission(mode, flight) {
     effects: [],
     arms: weapons(flight.type),
     target: null,
+    lockProgress: 0,
     message: '',
     flash: 0,
     event: 0,
@@ -125,6 +128,7 @@ function burst(mission, pos) {
 }
 
 function clearPath(from, to, map) {
+  if (Math.min(from[1], to[1]) > TERRAIN_HEIGHT) return true;
   const delta = sub(to, from);
   const steps = Math.max(3, Math.ceil(Math.hypot(...delta) / 23));
   for (let step = 1; step < steps; step++) {
@@ -133,20 +137,13 @@ function clearPath(from, to, map) {
   return true;
 }
 
-export function acquire(enemies, flight) {
-  const heading = forward(flight.yaw, flight.pitch);
-  let best = null;
-  let bestScore = -Infinity;
-  for (const enemy of enemies) {
-    const delta = sub(enemy.pos, flight.pos);
-    const range = Math.hypot(...delta);
-    if (range > 960 || range < 12) continue;
-    const aim = dot(scale(delta, 1 / range), heading);
-    if (aim < 0.91) continue;
-    const score = aim - range * 0.00015;
-    if (score > bestScore) { best = enemy; bestScore = score; }
-  }
-  return best;
+export function updateLock(mission, enemies, flight, map, dt, view = { aspect: 16 / 9, cockpit: false }) {
+  const lock = flight.death > 0 ? { target: null, progress: 0 } : trackLock(
+    { target: mission.target ?? null, progress: mission.lockProgress ?? 0 },
+    enemies, flight, dt, view, target => clearPath(flight.pos, target.pos, map)
+  );
+  mission.target = lock.target;
+  mission.lockProgress = lock.progress;
 }
 
 export function updateWeapons(mission, flight, command, map, dt) {
@@ -155,14 +152,13 @@ export function updateWeapons(mission, flight, command, map, dt) {
   arms.gunDelay = Math.max(0, arms.gunDelay - dt);
   arms.missileDelay = Math.max(0, arms.missileDelay - dt);
   arms.rocketDelay = Math.max(0, (arms.rocketDelay ?? 0) - dt);
-  arms.flare = Math.max(0, arms.flare - dt);
-  arms.evade = Math.max(0, arms.evade - dt);
   arms.heat = Math.max(0, arms.heat - dt * (arms.overheated ? 0.46 : command.fire ? 0.03 : 0.34));
   if (arms.overheated && arms.heat <= 0.24) arms.overheated = false;
   if (flight.death > 0 || mission.phase === 'complete') return;
 
   const nose = forward(flight.yaw, flight.pitch);
   const muzzle = add(flight.pos, scale(nose, 15));
+  const target = mission.lockProgress >= 1 ? mission.target : null;
 
   if (command.fire && arms.gunDelay === 0 && !arms.overheated) {
     arms.gunDelay = spec.gunRate;
@@ -172,24 +168,25 @@ export function updateWeapons(mission, flight, command, map, dt) {
       tell(mission, 'GUN OVERHEATED • Cooling');
     }
     let heading = nose;
-    const target = mission.target;
+    let assisted = false;
     if (target) {
-      const lead = distance(muzzle, target.pos) / 1020;
-      const aim = add(target.pos, scale(forward(target.yaw, target.pitch), target.speed * lead));
+      const aim = cannonLead(muzzle, target);
       const direction = norm(sub(aim, muzzle));
-      if (dot(heading, direction) > 0.968 && clearPath(muzzle, target.pos, map)) heading = direction;
+      if (dot(heading, direction) > 0.65) {
+        assisted = true;
+        heading = direction;
+      }
     }
-    mission.shots.push({ kind: 'tracer', pos: muzzle, velocity: scale(heading, 1020), life: 0.9, size: 2.8, damage: 28 });
+    mission.shots.push({ kind: 'tracer', pos: muzzle, velocity: scale(heading, CANNON_SPEED), life: 0.9, size: 2.8, damage: CANNON_DAMAGE, assisted });
   }
 
   if (command.missile && arms.missileDelay === 0) {
-    const target = mission.target;
     if (!arms.missiles) tell(mission, 'MISSILES EMPTY');
-    else if (!target || !clearPath(muzzle, target.pos, map)) tell(mission, 'MISSILE • Acquire a target in sight');
+    else if (!target) tell(mission, 'MISSILE • Hold target in the reticle until locked');
     else {
       arms.missiles--;
       arms.missileDelay = 0.45;
-      mission.shots.push({ kind: 'missile', pos: muzzle, velocity: scale(nose, 355), life: 5.0, size: 5.2, target, damage: 110 });
+      mission.shots.push({ kind: 'missile', pos: muzzle, velocity: scale(norm(sub(target.pos, muzzle)), 355), life: 5.0, size: 5.2, target, damage: MISSILE_DAMAGE });
     }
   }
 
@@ -203,29 +200,11 @@ export function updateWeapons(mission, flight, command, map, dt) {
     }
   }
 
-  if (command.flare && arms.flare === 0) {
-    const flaresLeft = arms.flaresLeft ?? 1;
-    if (flaresLeft <= 0) {
-      tell(mission, 'FLARES DEPLETED');
-    } else {
-      if (arms.flaresLeft !== undefined) arms.flaresLeft = Math.max(0, arms.flaresLeft - 1);
-      arms.flare = 4.2;
-      arms.evade = 1.35;
-      const side = [Math.cos(flight.yaw), 0, -Math.sin(flight.yaw)];
-      for (let i = 0; i < 12; i++) {
-        const rear = add(flight.pos, scale(nose, -8 - i * 0.7));
-        effect(mission, 'flare', rear, add(scale(nose, -26), add(scale(side, (i - 5.5) * 10), [0, -8 - i, 0])), 0.7 + i * 0.045, 4 + i % 3);
-      }
-      let deflected = false;
-      for (const shot of mission.shots) {
-        if (shot.kind !== 'enemyMissile' || distance(shot.pos, flight.pos) > 640) continue;
-        shot.target = null;
-        shot.life = Math.min(0.85, shot.life);
-        deflected = true;
-      }
-      tell(mission, deflected ? 'FLARES • Incoming missile diverted' : 'FLARES • Released');
-    }
+  if (command.flare && arms.flare <= dt) {
+    tell(mission, arms.flaresLeft > 0 ? 'COUNTERMEASURES • Three-stage flare sequence' : 'FLARES DEPLETED');
   }
+  stepFlarePattern(arms, flight, command.flare === true, dt,
+    (pos, velocity, life, size) => effect(mission, 'flare', pos, velocity, life, size));
 }
 
 function updateAmbush(mission, flight) {
@@ -298,6 +277,7 @@ function updateShots(mission, flight, map, dt) {
       const goal = norm(sub(target.pos, shot.pos));
       shot.velocity = scale(norm(add(scale(shot.velocity, (1 - guidance) / speed), scale(goal, guidance))), speed);
     }
+    const previous = shot.pos;
     shot.pos = add(shot.pos, scale(shot.velocity, dt));
     if (solidAt(...shot.pos, map)) { shot.life = 0; continue; }
     if (shot.kind === 'enemyMissile') {
@@ -306,7 +286,7 @@ function updateShots(mission, flight, map, dt) {
         continue;
       }
       const arms = mission.arms;
-      if (target && (arms.evade > 0 || (flight.boost > 0.64 && Math.abs(flight.bank) > 0.53 && distance(shot.pos, flight.pos) < 135))) {
+      if (target && ((arms.evade > 0 && distance(shot.pos, flight.pos) < 640) || (flight.boost > 0.64 && Math.abs(flight.bank) > 0.53 && distance(shot.pos, flight.pos) < 135))) {
         shot.target = null;
         shot.life = Math.min(0.8, shot.life);
         if (arms.evade <= 0) tell(mission, 'BOOST EVADE • Lock broken');
@@ -323,9 +303,9 @@ function updateShots(mission, flight, map, dt) {
     }
     if (mission.phase === 'ambush') continue;
     for (const enemy of mission.enemies) {
-      const hitRadius = shot.kind === 'missile' ? 22 : shot.kind === 'rocket' ? 20 : 15;
-      if (enemy.hp <= 0 || distance(shot.pos, enemy.pos) >= hitRadius) continue;
-      enemy.hp -= shot.damage;
+      const hitRadius = shot.kind === 'missile' ? 18 : shot.kind === 'rocket' ? 17 : shot.assisted === false ? 4.5 : 11;
+      if (enemy.hp <= 0 || !hitSegment(enemy.pos, previous, shot.pos, hitRadius)) continue;
+      enemy.hp = Math.max(0, enemy.hp - shot.damage);
       shot.life = 0;
       if (enemy.hp <= 0) {
         mission.kills++;
@@ -369,11 +349,14 @@ export function stepMission(mission, flight, command, map, dt) {
   }
 
   if (mission.phase === 'ambush') updateAmbush(mission, flight);
-  mission.target = acquire(mission.enemies, flight);
+  updateLock(mission, mission.enemies.filter(enemy => enemy.hp > 0), flight, map, dt);
   updateWeapons(mission, flight, command, map, dt);
   for (const enemy of mission.enemies) updateEnemy(enemy, mission, flight, map, dt);
   updateShots(mission, flight, map, dt);
-  mission.target = acquire(mission.enemies, flight);
+  if (mission.target?.hp <= 0) {
+    mission.target = null;
+    mission.lockProgress = 0;
+  }
   for (const item of mission.effects) {
     item.pos = add(item.pos, scale(item.velocity, dt));
     item.life -= dt;

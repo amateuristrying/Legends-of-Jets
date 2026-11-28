@@ -1,3 +1,4 @@
+import { BOT_HULL, CANNON_DAMAGE, CANNON_SPEED, MISSILE_DAMAGE, cannonLead, hitSegment, stepFlarePattern, trackLock, type LockView } from '../../shared/combat-rules.js';
 import type {
   AircraftEntity,
   BossProfile,
@@ -28,6 +29,7 @@ import {
   scale,
   solidAt,
   sub,
+  TERRAIN_HEIGHT,
   terrainHeight,
 } from './world';
 
@@ -179,6 +181,7 @@ export function explosionBurst(mission: MissionState, pos: Vec3, big = false): v
 }
 
 export function clearPath(from: Vec3, to: Vec3, map: number): boolean {
+  if (Math.min(from[1], to[1]) > TERRAIN_HEIGHT) return true;
   const delta = sub(to, from);
   const steps = Math.max(3, Math.ceil(Math.hypot(delta[0], delta[1], delta[2]) / 23));
   for (let step = 1; step < steps; step++) {
@@ -191,43 +194,22 @@ export function clearPath(from: Vec3, to: Vec3, map: number): boolean {
 const turnDifference = (to: number, from: number): number =>
   Math.atan2(Math.sin(to - from), Math.cos(to - from));
 
-export function acquireTarget(
-  enemies: AircraftEntity[],
-  groundTargets: GroundTarget[],
-  flight: FlightState
-): AircraftEntity | GroundTarget | null {
-  const heading = forward(flight.yaw, flight.pitch);
-  let best: AircraftEntity | GroundTarget | null = null;
-  let bestScore = -Infinity;
-
-  for (const enemy of enemies) {
-    if (enemy.hp <= 0) continue;
-    const delta = sub(enemy.pos, flight.pos);
-    const range = Math.hypot(delta[0], delta[1], delta[2]);
-    if (range > 1050 || range < 12) continue;
-    const aim = dot(scale(delta, 1 / range), heading);
-    if (aim < 0.9) continue;
-    const score = aim - range * 0.00014 + (enemy.isBoss ? 0.02 : 0);
-    if (score > bestScore) {
-      best = enemy;
-      bestScore = score;
-    }
+export function updateTargetLock(
+  mission: MissionState, flight: FlightState, map: number, dt: number, view: LockView
+): void {
+  if (flight.death > 0 || mission.phase === 'ambush') {
+    mission.target = null;
+    mission.lockProgress = 0;
+    return;
   }
-
-  for (const gt of groundTargets) {
-    if (gt.destroyed || gt.friendly) continue;
-    const delta = sub(gt.pos, flight.pos);
-    const range = Math.hypot(delta[0], delta[1], delta[2]);
-    if (range > 1100 || range < 15) continue;
-    const aim = dot(scale(delta, 1 / range), heading);
-    if (aim < 0.91) continue;
-    const score = aim - range * 0.00015 - 0.01;
-    if (score > bestScore) {
-      best = gt;
-      bestScore = score;
-    }
-  }
-  return best;
+  const targets: Array<AircraftEntity | GroundTarget> = [
+    ...mission.enemies.filter(enemy => enemy.hp > 0),
+    ...mission.groundTargets.filter(target => !target.destroyed && !target.friendly),
+  ];
+  const lock = trackLock({ target: mission.target, progress: mission.lockProgress },
+    targets, flight, dt, view, target => clearPath(flight.pos, target.pos, map));
+  mission.target = lock.target;
+  mission.lockProgress = lock.progress;
 }
 
 export function isAircraft(t: AircraftEntity | GroundTarget | FlightState | null | undefined): t is AircraftEntity {
@@ -251,8 +233,6 @@ export function updatePlayerWeapons(
   arms.gunDelay = Math.max(0, arms.gunDelay - dt);
   arms.missileDelay = Math.max(0, arms.missileDelay - dt);
   arms.rocketDelay = Math.max(0, arms.rocketDelay - dt);
-  arms.flare = Math.max(0, arms.flare - dt);
-  arms.evade = Math.max(0, arms.evade - dt);
 
   arms.heat = Math.max(
     0,
@@ -265,6 +245,7 @@ export function updatePlayerWeapons(
 
   const nose = forward(flight.yaw, flight.pitch);
   const muzzle = add(flight.pos, scale(nose, 15));
+  const target = mission.lockProgress >= 1 ? mission.target : null;
 
   if (command.fire && arms.gunDelay === 0 && !arms.overheated) {
     arms.gunDelay = spec.gunRate;
@@ -275,34 +256,32 @@ export function updatePlayerWeapons(
       tell(mission, 'GUN OVERHEATED • Cooling');
     }
     let heading = nose;
-    const target = mission.target;
+    let assisted = false;
     if (target) {
-      const lead = dist3(muzzle, target.pos) / 1020;
-      const aimPos = isAircraft(target)
-        ? add(target.pos, scale(forward(target.yaw, target.pitch), target.speed * lead))
-        : target.pos;
+      const aimPos = isAircraft(target) ? cannonLead(muzzle, target) : target.pos;
       const direction = norm(sub(aimPos, muzzle));
-      if (dot(heading, direction) > 0.968 && clearPath(muzzle, target.pos, map)) {
+      if (dot(heading, direction) > 0.65) {
+        assisted = true;
         heading = direction;
       }
     }
     mission.shots.push({
       kind: 'tracer',
       pos: muzzle,
-      velocity: scale(heading, 1020),
+      velocity: scale(heading, CANNON_SPEED),
       life: 0.9,
       size: 2.8,
-      damage: 28,
+      damage: CANNON_DAMAGE,
+      assisted,
       ownerName: 'YOU',
     });
   }
 
   if (command.missile && arms.missileDelay === 0) {
-    const target = mission.target;
     if (arms.missiles <= 0) {
       tell(mission, 'MISSILES EMPTY');
-    } else if (!target || !clearPath(muzzle, target.pos, map)) {
-      tell(mission, 'MISSILE • Acquire a target in sight');
+    } else if (!target) {
+      tell(mission, 'MISSILE • Hold target in the reticle until locked');
     } else {
       arms.missiles--;
       arms.missileDelay = 0.45;
@@ -310,11 +289,11 @@ export function updatePlayerWeapons(
       mission.shots.push({
         kind: 'missile',
         pos: muzzle,
-        velocity: scale(nose, 355),
+        velocity: scale(norm(sub(target.pos, muzzle)), 355),
         life: 5.0,
         size: 5.2,
         target,
-        damage: 110,
+        damage: MISSILE_DAMAGE,
         ownerName: 'YOU',
         smokeTimer: 0,
       });
@@ -341,36 +320,11 @@ export function updatePlayerWeapons(
     }
   }
 
-  if (command.flare && arms.flare === 0) {
-    if (arms.flaresLeft <= 0) {
-      tell(mission, 'FLARES DEPLETED');
-    } else {
-      arms.flaresLeft--;
-      arms.flare = 4.2;
-      arms.evade = 1.35;
-      firedFlare = true;
-      const side: Vec3 = [Math.cos(flight.yaw), 0, -Math.sin(flight.yaw)];
-      for (let i = 0; i < 12; i++) {
-        const rear = add(flight.pos, scale(nose, -8 - i * 0.7));
-        spawnEffect(
-          mission,
-          'flare',
-          rear,
-          add(scale(nose, -26), add(scale(side, (i - 5.5) * 10), [0, -8 - i, 0])),
-          0.7 + i * 0.045,
-          4 + (i % 3)
-        );
-      }
-      let deflected = false;
-      for (const shot of mission.shots) {
-        if (shot.kind !== 'enemyMissile' || dist3(shot.pos, flight.pos) > 640) continue;
-        shot.target = null;
-        shot.life = Math.min(0.85, shot.life);
-        deflected = true;
-      }
-      tell(mission, deflected ? 'FLARES • Incoming missile diverted' : 'FLARES • Released');
-    }
-  }
+  const flareStarted = command.flare && arms.flare <= dt && arms.flaresLeft > 0;
+  if (command.flare && arms.flare <= dt && arms.flaresLeft <= 0) tell(mission, 'FLARES DEPLETED');
+  firedFlare = stepFlarePattern(arms, flight, command.flare, dt,
+    (pos, velocity, life, size) => spawnEffect(mission, 'flare', pos, velocity, life, size));
+  if (flareStarted) tell(mission, 'COUNTERMEASURES • Three-stage flare sequence');
 
   return { firedGun, firedMissile, firedRocket, firedFlare };
 }
@@ -386,7 +340,7 @@ export function createAircraft(
   opts?: { isBoss?: boolean; bossProfile?: BossProfile; isEscortTarget?: boolean; hp?: number }
 ): AircraftEntity {
   const spec = planes[type] ?? planes[0];
-  const maxHp = opts?.hp ?? (opts?.isBoss ? 260 : opts?.isEscortTarget ? 180 : spec.hull);
+  const maxHp = opts?.hp ?? (opts?.isBoss ? 260 : opts?.isEscortTarget ? 180 : friendly ? spec.hull : BOT_HULL[difficulty]);
   return {
     id,
     name,
@@ -927,7 +881,7 @@ export function updateShots(
     }
 
     const target = shot.target;
-    if (target) {
+    if (target && !shot.decoyed) {
       const speed = Math.hypot(shot.velocity[0], shot.velocity[1], shot.velocity[2]);
       const guidance = Math.min(1, dt * (shot.kind === 'missile' ? 4.8 : 2.6));
       const goal = norm(sub(target.pos, shot.pos));
@@ -952,22 +906,25 @@ export function updateShots(
         if (target && dist3(target.pos, shot.pos) < 13) shot.life = 0;
         continue;
       }
+      if (shot.decoyed) continue;
       const arms = mission.arms;
       if (
         shot.kind === 'enemyMissile' &&
         target === flight &&
-        (arms.evade > 0 ||
+        ((arms.evade > 0 && dist3(shot.pos, flight.pos) < 640) ||
           (flight.boost > 0.64 &&
             Math.abs(flight.bank) > 0.53 &&
             dist3(shot.pos, flight.pos) < 135))
       ) {
         shot.target = null;
+        shot.decoyed = true;
+        shot.velocity = add(shot.velocity, [shot.velocity[2] * 0.5, -90, -shot.velocity[0] * 0.5]);
         shot.life = Math.min(0.8, shot.life);
-        if (arms.evade <= 0) tell(mission, 'BOOST EVADE • Lock broken');
+        tell(mission, arms.evade > 0 ? 'FLARES • Incoming missile diverted' : 'BOOST EVADE • Lock broken');
         continue;
       }
       // Hit player
-      if (!flight.death && dist3(shot.pos, flight.pos) < (shot.kind === 'enemyMissile' ? 15 : 12)) {
+      if (!flight.death && hitSegment(flight.pos, prevPos, shot.pos, shot.kind === 'enemyMissile' ? 15 : 12)) {
         flight.hull = Math.max(0, flight.hull - shot.damage);
         mission.damageFlash = 0.35;
         mission.shake = Math.max(mission.shake, 0.3);
@@ -1032,9 +989,9 @@ export function updateShots(
     let consumed = false;
     for (const enemy of mission.enemies) {
       if (enemy.hp <= 0) continue;
-      const hitRadius = shot.kind === 'missile' ? 22 : shot.kind === 'rocket' ? 20 : 15;
-      if (dist3(shot.pos, enemy.pos) >= hitRadius) continue;
-      enemy.hp -= shot.damage;
+      const hitRadius = shot.kind === 'missile' ? 18 : shot.kind === 'rocket' ? 17 : shot.assisted === false ? 4.5 : 11;
+      if (!hitSegment(enemy.pos, prevPos, shot.pos, hitRadius)) continue;
+      enemy.hp = Math.max(0, enemy.hp - shot.damage);
       shot.life = 0;
       consumed = true;
       if (shot.ownerName === 'YOU') {

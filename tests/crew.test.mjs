@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { BOT_HULL } from '../shared/combat-rules.js';
 import { ARENA_CENTER, ARENA_RADIUS, createMatch, normalizeInput, setMatchInput, snapshot, STEP, tickMatch, validateRules } from '../server/match.js';
 
 test('Crew acknowledges controls only after a tick and rejects stale packets after reconnect', () => {
@@ -117,13 +118,16 @@ test('Ace bots engage a live opponent with missiles and suppress friendly fire',
     pilot.flight.pos = [0, 720, 30]; pilot.flight.yaw = 0; pilot.spawnShield = 0;
   }
   tickMatch(match, 25);
+  assert.equal(bot.flight.maxHull, 150);
+  assert.equal(match.shots.some(shot => shot.kind === 'missile' && shot.owner.id === bot.id), false);
+  for (let step = 2; step <= 18; step++) tickMatch(match, step * 25);
   assert.ok(match.shots.some(shot => shot.kind === 'missile' && shot.owner.id === bot.id));
   const friend = match.pilots[1];
   friend.flight.pos = [1, 720, -430]; friend.flight.yaw = 0;
   const damageBefore = friend.flight.hull;
   const own = match.pilots[0]; own.flight.pos = [0, 720, -500];
-  setMatchInput(match, own.id, { fire: true }, 50);
-  for (let i = 2; i < 9; i++) tickMatch(match, i * 25);
+  setMatchInput(match, own.id, { fire: true }, 475);
+  for (let i = 19; i < 27; i++) tickMatch(match, i * 25);
   assert.equal(friend.flight.hull, damageBefore);
 });
 
@@ -162,5 +166,25 @@ test('Crew match supports rockets, 5 airframes, and central [0, 0] volcano refue
     assert.equal(p1.flight.fuel, p1.flight.maxFuel);
     assert.equal(p1.flight.hull, p1.flight.maxHull);
     assert.equal(p1.armory.arms.rockets, planes[3].rockets);
+  }
+});
+
+
+test('authoritative Crew bots carry difficulty-tier hulls and players rearm at a ring', () => {
+  for (const [difficulty, maxHull] of Object.entries(BOT_HULL)) {
+    const match = init({ mode: 'bots', difficulty });
+    assert.ok(match.pilots.filter(pilot => pilot.bot).every(pilot => pilot.flight.maxHull === maxHull));
+    const pilot = match.pilots[0];
+    const ring = pilot.rearmRings[2];
+    pilot.flight.pos = [ring.pos[0], ring.pos[1], ring.pos[2] - 1];
+    pilot.flight.yaw = 0;
+    pilot.armory.arms.missiles = 0;
+    pilot.armory.arms.flaresLeft = 0;
+    tickMatch(match, 25);
+    assert.equal(pilot.armory.arms.missiles, 3);
+    assert.equal(pilot.armory.arms.flaresLeft, pilot.armory.arms.maxFlares);
+    const state = snapshot(match, 25).pilots[0];
+    assert.ok(state.rearmCooldowns[2] > 14);
+    assert.match(state.message, /REARM CHECKPOINT/);
   }
 });

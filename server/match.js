@@ -1,3 +1,4 @@
+import { BOT_HULL, CANNON_DAMAGE, MISSILE_DAMAGE, createRearmRings, hitSegment, rearmThroughRing } from '../shared/combat-rules.js';
 import {
   add,
   CENTRAL_REFUEL_RADIUS,
@@ -14,7 +15,7 @@ import {
   sub,
 } from './sim/world.js';
 import { newFlight, stepFlight } from './sim/flight.js';
-import { acquire, updateWeapons, weapons } from './sim/mission.js';
+import { updateLock, updateWeapons, weapons } from './sim/mission.js';
 
 export const STEP = 1 / 40;
 export const ARENA_RADIUS = 1350;
@@ -72,17 +73,24 @@ function spawn(pilot, map) {
   pilot.outside = 0;
   pilot.spawnShield = 1.6;
   pilot.refuelCooldown = 0;
+  if (pilot.bot) pilot.flight.hull = pilot.flight.maxHull = pilot.botHull;
   pilot.armory.arms = weapons(pilot.type);
+  pilot.armory.target = null;
+  pilot.armory.lockProgress = 0;
 }
 
-function makePilot(record, slot, team, map, bot = false) {
+function makePilot(record, slot, team, map, botDifficulty = null) {
   const pilot = {
     id: record.id,
     name: record.name,
     type: planes[record.plane] ? record.plane : 0,
     slot,
     team,
-    bot,
+    bot: Boolean(botDifficulty),
+    botHull: botDifficulty ? BOT_HULL[botDifficulty] : null,
+    rearmRings: createRearmRings(map, height),
+    view: { cockpit: false, aspect: 16 / 9 },
+    hits: 0,
     points: 0,
     deaths: 0,
     outside: 0,
@@ -116,14 +124,14 @@ export function createMatch(rules, members, now) {
   if (rules.mode === 'bots') {
     for (let slot = 0; slot < rules.seats; slot++) {
       match.pilots.push(
-        makePilot({ id: 'bot-' + slot, name: 'Bandit ' + (slot + 1), plane: slot % planes.length }, slot, 1, rules.map, true)
+        makePilot({ id: 'bot-' + slot, name: 'Bandit ' + (slot + 1), plane: slot % planes.length }, slot, 1, rules.map, rules.difficulty)
       );
     }
   }
   return match;
 }
 
-export function setMatchInput(match, id, command, now, sequence) {
+export function setMatchInput(match, id, command, now, sequence, view) {
   const pilot = match.pilots.find(item => item.id === id && !item.bot);
   if (!pilot || match.phase !== 'playing') return;
   if (sequence !== undefined) {
@@ -134,6 +142,10 @@ export function setMatchInput(match, id, command, now, sequence) {
     pilot.input = { ...IDLE };
     pilot.lastInput = -1e9;
     return;
+  }
+  if (typeof view?.aspect === 'number' && Number.isFinite(view.aspect)) {
+    pilot.view.aspect = clamp(view.aspect, 0.4, 3);
+    pilot.view.cockpit = view.cockpit === true;
   }
   const input = normalizeInput(command);
   for (const flag of ['missile', 'rocket', 'flare', 'roll']) input[flag] ||= pilot.input[flag];
@@ -199,6 +211,8 @@ function defeat(match, pilot, killer, cause) {
   pilot.flight.hull = 0;
   pilot.flight.death = 1.45;
   pilot.deaths++;
+  pilot.armory.target = null;
+  pilot.armory.lockProgress = 0;
   pilot.armory.message = cause;
   pilot.armory.event++;
   if (killer && pilot.team !== killer.team) killer.points++;
@@ -215,19 +229,13 @@ function defeat(match, pilot, killer, cause) {
   }
 }
 
-function segmentDistance(point, from, to) {
-  const length = sub(to, from);
-  const lambda = clamp(dot(sub(point, from), length) / (dot(length, length) || 1), 0, 1);
-  return separation(point, add(from, scale(length, lambda)));
-}
-
 function flyShot(match, shot, dt) {
   shot.life -= dt;
   if (shot.life <= 0) return;
   const from = shot.pos;
   if (shot.target) {
     const victim = match.pilots.find(pilot => pilot.flight === shot.target);
-    if (!victim || victim.flight.death > 0 || victim.spawnShield > 0 || victim.armory.arms.evade > 0 ||
+    if (!victim || victim.flight.death > 0 || victim.spawnShield > 0 || (victim.armory.arms.evade > 0 && separation(from, victim.flight.pos) < 640) ||
         (victim.flight.boost > 0.64 && Math.abs(victim.flight.bank) > 0.53 && separation(from, victim.flight.pos) < 140)) {
       shot.target = null;
       shot.velocity = add(shot.velocity, [shot.velocity[2] * 0.8, 140, -shot.velocity[0] * 0.8]);
@@ -246,12 +254,13 @@ function flyShot(match, shot, dt) {
     return;
   }
   if (shot.decoyed) return;
-  const hitRadius = shot.kind === 'missile' ? 18 : shot.kind === 'rocket' ? 17 : 11;
-  const damage = shot.kind === 'missile' ? 68 : shot.kind === 'rocket' ? 58 : 19;
+  const hitRadius = shot.kind === 'missile' ? 18 : shot.kind === 'rocket' ? 17 : shot.assisted === false ? 4.5 : 11;
+  const damage = shot.kind === 'missile' ? MISSILE_DAMAGE : shot.kind === 'rocket' ? 58 : CANNON_DAMAGE;
   for (const pilot of match.pilots) {
     if (pilot.team === shot.owner.team || pilot.flight.death > 0 || pilot.spawnShield > 0) continue;
-    if (segmentDistance(pilot.flight.pos, from, shot.pos) > hitRadius) continue;
+    if (!hitSegment(pilot.flight.pos, from, shot.pos, hitRadius)) continue;
     shot.life = 0;
+    shot.owner.hits++;
     pilot.flight.hull = Math.max(0, pilot.flight.hull - damage);
     if (!pilot.flight.hull) defeat(match, pilot, shot.owner, 'SHOT DOWN');
     break;
@@ -279,6 +288,7 @@ export function tickMatch(match, now, dt = STEP) {
     const command = pilot.bot ? decideBot(match, pilot, dt) : now - pilot.lastInput < 450 ? pilot.input : IDLE;
     pilot.inputAck = pilot.inputSequence;
     const alive = pilot.flight.death <= 0;
+    const previousPos = pilot.flight.pos;
     stepFlight(pilot.flight, command, map, dt);
     if (pilot.flight.recovered) { spawn(pilot, map); continue; }
     if (alive && pilot.flight.death > 0) { defeat(match, pilot, null, 'TERRAIN COLLISION'); continue; }
@@ -299,12 +309,17 @@ export function tickMatch(match, now, dt = STEP) {
       pilot.armory.event++;
     }
 
+    if (rearmThroughRing(pilot.rearmRings, pilot.armory.arms, previousPos, pilot.flight.pos, match.time)) {
+      pilot.armory.message = 'REARM CHECKPOINT • Missiles and flares refilled';
+      pilot.armory.event++;
+    }
+
     const [x, , z] = pilot.flight.pos;
     const outside = Math.hypot(x - ARENA_CENTER[0], z - ARENA_CENTER[2]) > ARENA_RADIUS;
     pilot.outside = outside ? pilot.outside + dt : 0;
     if (pilot.outside + 1e-8 >= OUTSIDE_SECONDS) { defeat(match, pilot, null, 'LEFT THE COMBAT ZONE'); continue; }
     const hostiles = match.pilots.filter(enemy => enemy.team !== pilot.team && enemy.flight.death <= 0 && enemy.spawnShield <= 0).map(enemy => enemy.flight);
-    pilot.armory.target = acquire(hostiles, pilot.flight);
+    updateLock(pilot.armory, hostiles, pilot.flight, map, dt, pilot.view);
     updateWeapons(
       pilot.armory,
       pilot.flight,
@@ -342,6 +357,9 @@ export function snapshot(match, now) {
       bot: pilot.bot,
       points: pilot.points,
       deaths: pilot.deaths,
+      hits: pilot.hits,
+      lockProgress: pilot.armory.lockProgress,
+      rearmCooldowns: pilot.bot ? [] : pilot.rearmRings.map(ring => Math.max(0, ring.readyAt - match.time)),
       inputAck: pilot.inputAck,
       flight: pilot.flight,
       arms: pilot.armory.arms,
